@@ -20,6 +20,11 @@ The adapter uses the published Parquet file directly instead of the legacy
 ``massive.py`` dataset-loading script. This is required by modern versions of
 the Hugging Face ``datasets`` package, which no longer execute dataset scripts.
 
+The published Parquet files store the ``intent`` ClassLabel as its numeric
+class id. The ids below follow the official MASSIVE intent ordering, so the
+adapter explicitly converts those ids back to their intent names before
+filtering. String intent names are also accepted for compatibility.
+
 Example:
     python ml/prepare_massive_email.py --output data/massive_email_auxiliary.jsonl
 """
@@ -37,12 +42,38 @@ SOURCE_INTENTS: Dict[str, str] = {
     "email_addcontact": "REQUEST",
 }
 
+# MASSIVE's official _INTENTS ordering. The Parquet ClassLabel values for the
+# four email intents are therefore 15, 17, 33 and 44 respectively.
+INTENT_ID_TO_NAME: Dict[int, str] = {
+    15: "email_addcontact",
+    17: "email_querycontact",
+    33: "email_sendemail",
+    44: "email_query",
+}
+
 LOCALE = "en-US"
 LANGUAGE = "en"
 TRAIN_PARQUET_URL = (
     "https://huggingface.co/datasets/AmazonScience/massive/resolve/main/"
     "en-US/massive-train.parquet"
 )
+
+
+def normalize_source_intent(value: object) -> str:
+    """Return the MASSIVE intent name for either a ClassLabel id or name."""
+    if isinstance(value, bool):
+        return ""
+    if isinstance(value, int):
+        return INTENT_ID_TO_NAME.get(value, "")
+
+    text = str(value).strip()
+    if text in SOURCE_INTENTS:
+        return text
+
+    try:
+        return INTENT_ID_TO_NAME.get(int(text), "")
+    except ValueError:
+        return ""
 
 
 def main() -> None:
@@ -67,7 +98,7 @@ def main() -> None:
 
     rows = []
     for item in dataset:
-        source_intent = str(item["intent"])
+        source_intent = normalize_source_intent(item["intent"])
         if source_intent not in SOURCE_INTENTS:
             continue
 
