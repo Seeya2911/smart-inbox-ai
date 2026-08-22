@@ -16,9 +16,9 @@ corpus. No urgency or priority labels are inferred from MASSIVE; doing so
 would introduce unverified labels. Source locale, original intent and source
 id are retained for provenance.
 
-The adapter uses the published Parquet file directly instead of the legacy
-``massive.py`` dataset-loading script. This is required by modern versions of
-the Hugging Face ``datasets`` package, which no longer execute dataset scripts.
+The adapter downloads the published Parquet artifact directly and then loads
+that local file. This avoids both the legacy ``massive.py`` dataset script and
+Hugging Face filesystem URL resolution issues in modern ``datasets`` versions.
 
 Example:
     python ml/prepare_massive_email.py --output data/massive_email_auxiliary.jsonl
@@ -27,8 +27,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import tempfile
 from pathlib import Path
 from typing import Dict
+from urllib.request import Request, urlopen
 
 SOURCE_INTENTS: Dict[str, str] = {
     "email_query": "INFORMATION",
@@ -40,9 +42,20 @@ SOURCE_INTENTS: Dict[str, str] = {
 LOCALE = "en-US"
 LANGUAGE = "en"
 TRAIN_PARQUET_URL = (
-    "https://huggingface.co/datasets/AmazonScience/massive/resolve/main/"
-    "en-US/massive-train.parquet"
+    "https://huggingface.co/datasets/AmazonScience/massive/resolve/"
+    "97cb84b8ee1f104fb75c1f2062e3deb99be62803/en-US/massive-train.parquet"
 )
+
+
+def download_parquet(destination: Path) -> None:
+    """Download the published MASSIVE Parquet artifact to a local path."""
+    request = Request(TRAIN_PARQUET_URL, headers={"User-Agent": "smart-inbox-ai/1.0"})
+    with urlopen(request, timeout=120) as response, destination.open("wb") as handle:
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            handle.write(chunk)
 
 
 def main() -> None:
@@ -57,34 +70,43 @@ def main() -> None:
             "The datasets package is required. Install the optional ML/data dependencies first."
         ) from exc
 
-    # Load the published Parquet artifact directly. This avoids the legacy
-    # AmazonScience/massive dataset script, which datasets >= 4 no longer supports.
-    dataset = load_dataset(
-        "parquet",
-        data_files={"train": TRAIN_PARQUET_URL},
-        split="train",
-    )
+    # Download first instead of passing an https:// URL to datasets. Recent
+    # datasets releases may resolve remote data through hf:// and fail to find
+    # the published Parquet path even though the artifact is publicly available.
+    with tempfile.TemporaryDirectory(prefix="smart-inbox-massive-") as temp_dir:
+        parquet_path = Path(temp_dir) / "massive-train.parquet"
+        print(f"Downloading MASSIVE {LOCALE} training data...")
+        try:
+            download_parquet(parquet_path)
+        except Exception as exc:
+            raise SystemExit(f"Failed to download MASSIVE Parquet data: {exc}") from exc
 
-    rows = []
-    for item in dataset:
-        source_intent = str(item["intent"])
-        if source_intent not in SOURCE_INTENTS:
-            continue
-
-        rows.append(
-            {
-                "id": f"massive-{LOCALE}-{item['id']}",
-                "language": LANGUAGE,
-                "subject": "",
-                "body": item["utt"],
-                "intent": SOURCE_INTENTS[source_intent],
-                "source_dataset": "AmazonScience/massive",
-                "source_locale": LOCALE,
-                "source_intent": source_intent,
-                "source_split": "train",
-                "source_id": str(item["id"]),
-            }
+        dataset = load_dataset(
+            "parquet",
+            data_files={"train": str(parquet_path)},
+            split="train",
         )
+
+        rows = []
+        for item in dataset:
+            source_intent = str(item["intent"])
+            if source_intent not in SOURCE_INTENTS:
+                continue
+
+            rows.append(
+                {
+                    "id": f"massive-{LOCALE}-{item['id']}",
+                    "language": LANGUAGE,
+                    "subject": "",
+                    "body": item["utt"],
+                    "intent": SOURCE_INTENTS[source_intent],
+                    "source_dataset": "AmazonScience/massive",
+                    "source_locale": LOCALE,
+                    "source_intent": source_intent,
+                    "source_split": "train",
+                    "source_id": str(item["id"]),
+                }
+            )
 
     if not rows:
         raise SystemExit("No matching MASSIVE email-intent examples were found.")
