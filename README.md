@@ -1,21 +1,23 @@
 # Smart Inbox AI
 
-A research-oriented email intelligence prototype that combines **large language model (LLM) analysis**, deterministic NLP baselines, user feedback, prioritisation, and an interactive Streamlit interface.
+A research-oriented email intelligence prototype that combines **large language model (LLM) analysis**, deterministic NLP baselines, multilingual validation, user feedback, prioritisation, and an interactive Streamlit interface.
 
 > **Academic scope:** This repository is a research and engineering prototype, not a production email security, autonomous-agent, or enterprise mail-management system.
 
 ## Why this project is AI/LLM-based
 
-The current architecture separates semantic analysis from deterministic baseline logic. The LLM layer produces validated structured analysis of an email, while the historical rule-based summarizer remains available as a reproducible baseline and fallback.
+The architecture separates semantic analysis from deterministic baseline logic. The LLM layer produces validated structured analysis of the complete email, while the historical rule-based summarizer remains available as a reproducible baseline and fallback.
 
 ```text
                          Email
                            │
-                    normalization
+                  input validation
+                           │
+                 language detection
                            │
               ┌────────────┴────────────┐
               │                         │
-      Deterministic baseline       LLM analysis
+      Deterministic baseline       LLM semantic analysis
       SmartBrief v3                LLMProvider
               │                  ┌──────┴──────┐
               │                  │             │
@@ -32,7 +34,9 @@ The current architecture separates semantic analysis from deterministic baseline
              │             │             │
              └─────────────┼─────────────┘
                            ▼
-                priority / suggestions
+                priority / actions / entities
+                           │
+                  language consistency
                            │
                      user feedback
                            │
@@ -49,27 +53,45 @@ The repository is designed around questions such as:
 2. How does structured-output validation affect robustness of downstream email workflows?
 3. What are the trade-offs between hosted and local LLM inference in latency, privacy, and reproducibility?
 4. Can user feedback improve prioritisation without silently changing the semantic analysis model?
+5. How consistently does semantic analysis perform across English, German, French, and Spanish emails?
 
 These questions are intentionally more modest than claiming general-purpose autonomous email intelligence.
 
-## Architecture
+## Multilingual semantic analysis
 
-### LLM layer
+The initial evaluation scope covers **English (`en`), German (`de`), French (`fr`), and Spanish (`es`)**.
+
+Language detection is an independent validation signal. The original email text is preserved for the LLM; the application does **not** remove stop words, stem words, or lemmatize the message before semantic inference. This is deliberate because destructive preprocessing can remove information such as negation and modality that affects meaning.
+
+The LLM prompt explicitly requires contextual analysis of the complete subject and body. Urgency and priority are not defined as keyword lookups. The system is expected to consider deadlines, consequences, requested actions, negation, modality, politeness, and relationships between sentences.
+
+The analyzer records both the LLM-reported language and an independent detector result. A disagreement is surfaced as a validation signal rather than silently choosing one answer.
+
+### Evaluation corpus
+
+`evaluation/multilingual_cases.jsonl` contains a small, version-controlled synthetic evaluation corpus covering equivalent scenarios across the four languages. It deliberately includes cases where urgency is **implicit** (for example, a deadline tomorrow) and cases where urgency is explicitly **negated**. These cases are intended to expose shallow keyword-based behaviour.
+
+The corpus is an evaluation resource, not evidence of real-world generalisation. Reported benchmark numbers must come from an explicit evaluation run against a documented test set.
+
+## LLM layer
 
 The `llm/` package contains:
 
 - `provider.py` — provider abstraction and OpenAI-compatible client support.
-- `schemas.py` — validated structured `EmailAnalysis` output.
-- `analyzer.py` — orchestration of prompt construction and provider output.
+- `schemas.py` — validated structured `EmailAnalysis` output, including language metadata.
+- `analyzer.py` — input validation, independent language detection, semantic-provider orchestration, and language-disagreement reporting.
+- `language.py` — deterministic language detection and conservative validation for the four-language evaluation scope.
 - `__init__.py` — public package interface.
 
 The provider boundary allows hosted APIs, OpenAI-compatible local endpoints, and deterministic mock inference to share the same application contract.
 
-### Deterministic baseline
+## Deterministic baseline
 
 `smart_summarizer_v3.py` is explicitly retained as a **baseline**, not presented as an LLM. It provides reproducible summarisation, intent classification, urgency analysis, and context handling for regression tests and future comparative evaluation.
 
-### Feedback and personalisation
+The `MockLLMProvider` is also explicitly **not an LLM**. It exists for credential-free CI and contract testing; its simple rules must not be used as reported LLM performance.
+
+## Feedback and personalisation
 
 The existing feedback and priority components are kept separate from semantic LLM inference. This prevents user-specific preferences from being confused with model capability when evaluating results.
 
@@ -151,19 +173,23 @@ python -m pytest -q
 
 GitHub Actions also compiles the repository and executes the tests on pushes and pull requests.
 
-The test suite includes both the modern LLM analysis layer and regression coverage for the deterministic baseline.
+The test suite includes the modern LLM analysis layer, multilingual validation, and regression coverage for the deterministic baseline.
 
 ## Evaluation plan
 
-The project should report LLM results separately from historical rule-based results. A future evaluation run should use a fixed, documented test set and report at least:
+The project should report LLM results separately from historical rule-based results. The multilingual corpus is a starting evaluation resource; it is intentionally small and should not be presented as a benchmark.
+
+Future evaluation runs should use a fixed, documented test set and report at least:
 
 | Dimension | Example measure |
 |---|---|
 | Intent classification | Accuracy / macro-F1 |
 | Urgency classification | Accuracy / macro-F1 |
+| Priority classification | Accuracy / macro-F1 |
+| Language detection | Accuracy / macro-F1 |
 | Structured output | Schema-valid response rate |
 | Summary quality | Human rating or documented rubric |
-| Robustness | Invalid-output / retry rate |
+| Semantic robustness | Performance on implicit urgency, negation, ambiguity, and mixed-language cases |
 | Efficiency | Median and p95 latency |
 | Privacy | Hosted vs local data-flow description |
 | Reproducibility | Provider/model/version/configuration |
@@ -176,8 +202,11 @@ No benchmark number should be claimed until it has been measured on a documented
 smart-inbox-ai/
 ├── llm/
 │   ├── analyzer.py
+│   ├── language.py
 │   ├── provider.py
 │   └── schemas.py
+├── evaluation/
+│   └── multilingual_cases.jsonl
 ├── tests/
 ├── main.py
 ├── app.py
@@ -200,22 +229,23 @@ This project should not be presented as a production autonomous email agent. Imp
 
 - LLM outputs can be incorrect or overconfident even when the schema is valid.
 - Intent and urgency labels depend on the evaluation dataset and label definitions.
+- Language detection can be uncertain for very short or mixed-language messages.
 - User feedback can introduce preference bias.
 - Local-model quality depends on the selected model and hardware.
 - Hosted inference introduces external data-processing considerations.
-- The current project does not establish broad generalisation across languages, organisations, or mailbox providers.
+- The current multilingual corpus is small and does not establish broad cross-language generalisation.
 
 ## Academic positioning
 
-The strongest contribution of this repository is the **separation of concerns** between semantic LLM inference, deterministic baseline analysis, personalisation, feedback, and presentation. This makes the system easier to reproduce, evaluate, and extend than a monolithic API-driven demo.
+The strongest contribution of this repository is the **separation of concerns** between semantic LLM inference, independent language validation, deterministic baseline analysis, personalisation, feedback, and presentation. This makes the system easier to reproduce, evaluate, and extend than a monolithic API-driven demo.
 
 For academic review, focus on the architecture, evaluation methodology, reproducibility, privacy assumptions, and limitations rather than claiming that an LLM automatically makes every inbox decision correctly.
 
 ## Future work
 
-1. Build a labelled evaluation corpus with explicit intent and urgency definitions.
+1. Expand the labelled evaluation corpus with explicit intent and urgency definitions.
 2. Compare at least one hosted and one local model under the same evaluation protocol.
-3. Add multilingual evaluation, including German-language email samples.
+3. Measure multilingual performance across English, German, French, and Spanish, including mixed-language cases.
 4. Measure calibration and abstention behaviour for low-confidence analyses.
 5. Add prompt/version tracking so experiments can be reproduced.
 6. Integrate feedback into a documented learning protocol rather than silently modifying decisions.
