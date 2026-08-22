@@ -14,6 +14,10 @@ from typing import Any, Dict
 from .schemas import EmailAnalysis
 
 
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_OPENAI_MODEL = "gpt-5.6"
+
+
 SYSTEM_PROMPT = """You are a multilingual email intelligence system.
 
 Read the ENTIRE supplied email (subject and body) and infer meaning from context.
@@ -52,8 +56,40 @@ class LLMProvider(ABC):
         raise NotImplementedError
 
 
+def resolve_openai_config(
+    api_key: str | None = None,
+    base_url: str | None = None,
+    model: str | None = None,
+) -> tuple[str, str, str]:
+    """Resolve OpenAI settings without requiring configuration beyond the API key.
+
+    ``OPENAI_*`` variables are the preferred interface for direct OpenAI usage.
+    The older ``LLM_*`` variables remain supported for OpenAI-compatible providers
+    and backwards compatibility.
+    """
+    resolved_key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("LLM_API_KEY")
+    if not resolved_key:
+        raise RuntimeError(
+            "No API key configured. Set OPENAI_API_KEY for OpenAI, or pass api_key explicitly."
+        )
+
+    resolved_base_url = (
+        base_url
+        or os.getenv("OPENAI_BASE_URL")
+        or os.getenv("LLM_BASE_URL")
+        or DEFAULT_OPENAI_BASE_URL
+    )
+    resolved_model = (
+        model
+        or os.getenv("OPENAI_MODEL")
+        or os.getenv("LLM_MODEL")
+        or DEFAULT_OPENAI_MODEL
+    )
+    return resolved_key, resolved_base_url, resolved_model
+
+
 class OpenAICompatibleProvider(LLMProvider):
-    """Call any OpenAI-compatible chat-completions endpoint."""
+    """Call OpenAI or another OpenAI-compatible chat-completions endpoint."""
 
     def __init__(
         self,
@@ -68,11 +104,12 @@ class OpenAICompatibleProvider(LLMProvider):
                 "The OpenAI-compatible provider requires the 'openai' package."
             ) from exc
 
-        self.model = model or os.getenv("LLM_MODEL", "gpt-4o-mini")
-        self.client = OpenAI(
-            api_key=api_key or os.getenv("LLM_API_KEY"),
-            base_url=base_url or os.getenv("LLM_BASE_URL"),
+        self.api_key, self.base_url, self.model = resolve_openai_config(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
         )
+        self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
 
     def analyze(self, message: Dict[str, Any]) -> EmailAnalysis:
         subject = str(message.get("subject", "")).strip()
