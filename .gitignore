@@ -39,6 +39,12 @@ models/
 # Streamlit
 .streamlit/secrets.toml
 
+# Downloaded/generated research data and model artifacts
+data/raw/
+data/processed/
+data/*.jsonl
+artifacts/
+
 # OS/editor files
 .DS_Store
 Thumbs.db
