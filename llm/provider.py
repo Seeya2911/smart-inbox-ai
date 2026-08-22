@@ -80,7 +80,13 @@ class OpenAICompatibleProvider(LLMProvider):
         if not body and not subject:
             raise ValueError("Cannot analyze an empty message")
 
-        user_content = f"Subject: {subject}\n\nBody:\n{body}".strip()
+        detected_language = str(message.get("detected_language", "unknown"))
+        detected_confidence = float(message.get("detected_language_confidence", 0.0))
+        user_content = (
+            f"Subject: {subject}\n\nBody:\n{body}\n\n"
+            f"Independent language detector: {detected_language} "
+            f"(confidence={detected_confidence:.3f}). Treat this only as a validation signal."
+        ).strip()
         response = self.client.chat.completions.create(
             model=self.model,
             temperature=0.1,
@@ -113,6 +119,8 @@ class MockLLMProvider(LLMProvider):
         body = str(message.get("message_text", message.get("body", ""))).strip()
         text = f"{subject} {body}".strip()
         lowered = text.lower()
+        language = str(message.get("detected_language", "unknown"))
+        language_confidence = float(message.get("detected_language_confidence", 0.0))
 
         if any(word in lowered for word in ("urgent", "asap", "immediately")):
             urgency = priority = "high"
@@ -136,8 +144,8 @@ class MockLLMProvider(LLMProvider):
             urgency=urgency,
             sentiment=sentiment,
             priority=priority,
-            language="unknown",
-            language_confidence=0.0,
+            language=language if language in {"en", "de", "fr", "es"} else "unknown",
+            language_confidence=language_confidence,
             reasoning="Deterministic mock provider used for testing; not an LLM prediction.",
             confidence=0.5,
             model=self.model,
