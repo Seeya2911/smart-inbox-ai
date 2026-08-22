@@ -1,3 +1,7 @@
 # Optional local ML/NLP stack. Kept separate from the core app/CI dependencies.
 sentence-transformers>=3.0.0,<6.0.0
+scikit-learn>=1.4,<2.0
+numpy>=1.26,<3.0
 joblib>=1.3.0
+# Optional dataset preparation dependency for the MASSIVE adapter.
+datasets>=2.18,<5.0
