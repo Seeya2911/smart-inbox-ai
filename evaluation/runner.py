@@ -7,11 +7,44 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
+from email_agent import EmailAgent
 from llm.analyzer import EmailAnalyzer
 from llm.provider import MockLLMProvider, OpenAICompatibleProvider
 
 LANGUAGES = ("en", "de", "fr", "es")
 LABEL_FIELDS = ("intent", "urgency", "priority")
+
+
+class KeywordBaseline:
+    """Adapt the repository's legacy keyword classifier into the evaluation schema.
+
+    This is deliberately a weak, transparent baseline. It is not presented as an
+    NLP model and its limitations are part of the experiment. The legacy agent's
+    category output is mapped only where the mapping is defensible; unmatched
+    categories fall back to the neutral labels used by the evaluation taxonomy.
+    """
+
+    def __init__(self) -> None:
+        self.agent = EmailAgent()
+
+    def predict(self, email: Dict[str, Any]) -> Dict[str, str]:
+        text = f"{email.get('subject', '')} {email.get('body', email.get('message_text', ''))}".strip()
+        category = self.agent.classify(text)
+        if category == "urgent":
+            urgency = priority = "high"
+        else:
+            urgency = priority = "medium"
+
+        intent_map = {
+            "work": "information",
+            "personal": "information",
+            "financial": "information",
+            "promotional": "promotion",
+            "newsletter": "notification",
+            "security": "notification",
+        }
+        intent = "other" if category == "general" else intent_map.get(category, "other")
+        return {"intent": intent, "urgency": urgency, "priority": priority}
 
 
 def load_cases(path: Path) -> List[Dict[str, Any]]:
@@ -59,11 +92,11 @@ def macro_f1(pairs: List[Tuple[str, str]]) -> float:
     return sum(scores) / len(scores) if scores else 0.0
 
 
-def aggregate(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+def aggregate(rows: Iterable[Dict[str, Any]], prediction_key: str = "prediction") -> Dict[str, Any]:
     rows = list(rows)
     result: Dict[str, Any] = {}
     for field in LABEL_FIELDS:
-        pairs = [(str(r["expected"][field]), str(r["prediction"].get(field, ""))) for r in rows]
+        pairs = [(str(r["expected"][field]), str(r[prediction_key].get(field, ""))) for r in rows]
         result[field] = {"accuracy": round(accuracy(pairs), 4), "macro_f1": round(macro_f1(pairs), 4)}
     return result
 
@@ -91,6 +124,22 @@ def evaluate(analyzer: EmailAnalyzer, cases: List[Dict[str, Any]]) -> Dict[str, 
     return report
 
 
+def evaluate_baseline(baseline: KeywordBaseline, cases: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Evaluate the legacy keyword baseline using exactly the same labels and cases."""
+    grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for case in cases:
+        prediction = baseline.predict(case["email"])
+        grouped[case["language"]].append({"id": case["id"], "expected": case["expected"], "prediction": prediction})
+
+    all_rows = [row for rows in grouped.values() for row in rows]
+    report: Dict[str, Any] = {"languages": {}}
+    for language in LANGUAGES:
+        rows = grouped.get(language, [])
+        report["languages"][language] = {"cases": len(rows), "metrics": aggregate(rows)}
+    report["aggregate"] = aggregate(all_rows)
+    return report
+
+
 def build_provider(kind: str):
     return MockLLMProvider() if kind == "mock" else OpenAICompatibleProvider()
 
@@ -104,6 +153,11 @@ def main() -> None:
 
     cases = load_cases(Path(args.corpus))
     report = evaluate(EmailAnalyzer(build_provider(args.provider)), cases)
+    report["baseline"] = evaluate_baseline(KeywordBaseline(), cases)
+    report["comparison_note"] = (
+        "The baseline is the repository's legacy keyword classifier adapted to the "
+        "evaluation taxonomy. It is intentionally transparent and is not an ML model."
+    )
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
