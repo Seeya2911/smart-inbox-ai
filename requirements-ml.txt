@@ -1,0 +1,3 @@
+# Optional local ML/NLP stack. Kept separate from the core app/CI dependencies.
+sentence-transformers>=3.0.0,<6.0.0
+joblib>=1.3.0
