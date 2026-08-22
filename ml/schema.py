@@ -36,6 +36,8 @@ class CanonicalIntentExample:
     original_label: str
     original_split: str = "unspecified"
     source_group_id: str = ""
+    is_synthetic: bool = False
+    provenance: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.text, str) or not self.text.strip():
@@ -85,4 +87,6 @@ class CanonicalIntentExample:
             original_label=str(data.get("original_label", data.get("action_intent", data.get("source_intent", "")))),
             original_split=str(data.get("original_split", data.get("source_split", "unspecified"))).strip(),
             source_group_id=str(data.get("source_group_id", data.get("source_file", ""))).strip(),
+            is_synthetic=bool(data.get("is_synthetic", False)),
+            provenance=str(data.get("provenance", "")).strip(),
         )

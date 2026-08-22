@@ -1,17 +1,18 @@
 """Data Quality & Leakage Detection Module for Smart Inbox INTENT Training.
 
-Provides validation for dataset cleanliness (empty text, duplicates, label conflicts)
-and strict cross-split leakage detection (exact match, normalized overlap, and near-duplicates).
-The pipeline FAILS LOUDLY if data leakage is detected.
+Provides validation for dataset cleanliness (empty text, missing labels, duplicate source IDs,
+conflicting labels for identical source IDs/text) and strict cross-split leakage detection
+(exact match, normalized overlap, source-group overlap, and near-duplicates).
+
+The pipeline FAILS LOUDLY if data leakage or data quality violations are detected.
 """
 from __future__ import annotations
 
 import re
 from collections import defaultdict
-from difflib import SequenceMatcher
 from typing import Dict, List, Set, Tuple
 
-from ml.schema import CanonicalIntentExample
+from ml.schema import ALLOWED_INTENTS, CanonicalIntentExample
 
 
 class DataQualityError(ValueError):
@@ -31,7 +32,7 @@ def normalize_text(text: str) -> str:
     return cleaned.strip()
 
 
-def compute_ngram_jaccard(text1: str, text2: str, n: int = 3) -> float:
+def compute_ngram_jaccard(text1: str, text2: str, n: int = 4) -> float:
     """Compute character n-gram Jaccard similarity between two normalized strings."""
     if text1 == text2:
         return 1.0
@@ -52,12 +53,14 @@ def check_dataset_integrity(
     examples: List[CanonicalIntentExample],
     allow_internal_duplicates: bool = False,
 ) -> Dict[str, int]:
-    """Validate cleanliness of a dataset before splitting.
+    """Validate cleanliness of a dataset before splitting or model fitting.
 
     Checks:
+    - Empty dataset
     - Empty text
+    - Missing or invalid canonical intent labels
     - Duplicate source IDs (source_dataset, source_example_id)
-    - Conflicting labels (same normalized text assigned different canonical intents)
+    - Conflicting labels for the same source ID or same normalized text
     - Duplicate text (exact and normalized) within the dataset
 
     Raises:
@@ -66,28 +69,41 @@ def check_dataset_integrity(
     if not examples:
         raise DataQualityError("Dataset is empty; cannot run quality checks.")
 
-    # 1. Empty text check
+    # 1. Empty text & Missing label checks
     for idx, ex in enumerate(examples):
         if not ex.text or not ex.text.strip():
             raise DataQualityError(
                 f"Empty text detected at index {idx} (source_dataset={ex.source_dataset!r}, ID={ex.source_example_id!r})"
             )
+        if not ex.canonical_intent or ex.canonical_intent not in ALLOWED_INTENTS:
+            raise DataQualityError(
+                f"Missing or invalid canonical_intent label {ex.canonical_intent!r} at index {idx} "
+                f"(source_dataset={ex.source_dataset!r}, ID={ex.source_example_id!r})"
+            )
 
-    # 2. Duplicate source IDs check
-    seen_source_ids: Set[Tuple[str, str]] = set()
-    dup_source_ids: List[Tuple[str, str]] = []
+    # 2. Duplicate source IDs & Conflicting labels for same source ID check
+    source_id_map: Dict[Tuple[str, str], Set[str]] = defaultdict(set)
     for ex in examples:
         key = (ex.source_dataset, ex.source_example_id)
-        if key in seen_source_ids:
-            dup_source_ids.append(key)
-        seen_source_ids.add(key)
+        source_id_map[key].add(ex.canonical_intent)
+
+    dup_source_ids = [key for key, intents in source_id_map.items() if len(intents) > 1 or sum(1 for e in examples if (e.source_dataset, e.source_example_id) == key) > 1]
+    conflict_source_ids = {key: intents for key, intents in source_id_map.items() if len(intents) > 1}
+
+    if conflict_source_ids:
+        sample_key, sample_intents = next(iter(conflict_source_ids.items()))
+        raise DataQualityError(
+            f"Conflicting labels detected for identical source ID ({len(conflict_source_ids)} conflict groups). "
+            f"Source dataset={sample_key[0]!r}, ID={sample_key[1]!r} has conflicting labels: {sorted(sample_intents)}"
+        )
+
     if dup_source_ids:
         raise DataQualityError(
-            f"Duplicate source IDs detected within dataset ({len(dup_source_ids)} duplicates). "
+            f"Duplicate source IDs detected within dataset ({len(dup_source_ids)} duplicate source IDs). "
             f"Examples: {dup_source_ids[:5]}"
         )
 
-    # 3. Conflicting labels check (same normalized text, different canonical_intent)
+    # 3. Conflicting labels check for identical normalized text
     text_to_labels: Dict[str, Set[str]] = defaultdict(set)
     for ex in examples:
         norm = normalize_text(ex.text)
@@ -101,7 +117,7 @@ def check_dataset_integrity(
             f"Sample text snippet: {sample_conflict[0][:80]!r} has labels {sorted(sample_conflict[1])}"
         )
 
-    # 4. Duplicate text check
+    # 4. Duplicate text check within dataset
     if not allow_internal_duplicates:
         seen_norm_text: Set[str] = set()
         dup_texts: List[str] = []
@@ -118,7 +134,7 @@ def check_dataset_integrity(
 
     return {
         "total_checked": len(examples),
-        "unique_source_ids": len(seen_source_ids),
+        "unique_source_ids": len(source_id_map),
         "unique_normalized_texts": len(text_to_labels),
     }
 
@@ -134,7 +150,9 @@ def check_split_leakage(
     Checks:
     - Exact text overlap between splits
     - Normalized-text overlap between splits
-    - Obvious near-duplicate overlap between splits (via character n-gram similarity)
+    - Duplicate source IDs across splits
+    - Source-group overlap across splits
+    - Obvious near-duplicate overlap between splits (via character n-gram Jaccard similarity)
 
     Raises:
         DataLeakageError: FAILS LOUDLY if any split overlap or near-duplicate leakage is detected.
@@ -148,7 +166,40 @@ def check_split_leakage(
     split_names = list(splits.keys())
     leakage_records: List[str] = []
 
-    # 1. Exact and normalized text overlap
+    # 1. Source Group Overlap Check across splits
+    split_groups: Dict[str, Set[str]] = defaultdict(set)
+    for split_name, examples in splits.items():
+        for ex in examples:
+            gid = ex.source_group_id if ex.source_group_id else ex.source_example_id
+            split_groups[split_name].add(gid)
+
+    for i in range(len(split_names)):
+        for j in range(i + 1, len(split_names)):
+            s1, s2 = split_names[i], split_names[j]
+            overlap_gids = split_groups[s1] & split_groups[s2]
+            if overlap_gids:
+                leakage_records.append(
+                    f"[Source-Group Leakage] {len(overlap_gids)} group ID(s) occur across splits '{s1}' and '{s2}'. "
+                    f"Sample overlapping group IDs: {sorted(list(overlap_gids))[:5]}"
+                )
+
+    # 2. Duplicate Source ID Check across splits
+    split_source_ids: Dict[str, Set[Tuple[str, str]]] = defaultdict(set)
+    for split_name, examples in splits.items():
+        for ex in examples:
+            split_source_ids[split_name].add((ex.source_dataset, ex.source_example_id))
+
+    for i in range(len(split_names)):
+        for j in range(i + 1, len(split_names)):
+            s1, s2 = split_names[i], split_names[j]
+            overlap_ids = split_source_ids[s1] & split_source_ids[s2]
+            if overlap_ids:
+                leakage_records.append(
+                    f"[Duplicate Source ID Leakage] {len(overlap_ids)} source ID(s) occur across splits '{s1}' and '{s2}'. "
+                    f"Sample overlapping IDs: {sorted(list(overlap_ids))[:5]}"
+                )
+
+    # 3. Exact and Normalized Text Overlap Check across splits
     norm_text_map: Dict[str, Dict[str, Set[str]]] = defaultdict(lambda: defaultdict(set))
     for split_name, examples in splits.items():
         for ex in examples:
@@ -163,7 +214,7 @@ def check_split_leakage(
                 f"[Normalized Text Overlap] Text snippet {norm_text[:80]!r} occurs across splits ({', '.join(involved_splits)}). IDs: {ids_str}"
             )
 
-    # 2. Near-duplicate leakage check across split pairs
+    # 4. Near-duplicate leakage check across split pairs
     for i in range(len(split_names)):
         for j in range(i + 1, len(split_names)):
             s1_name, s2_name = split_names[i], split_names[j]
