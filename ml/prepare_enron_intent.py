@@ -49,11 +49,15 @@ def main() -> None:
                     "language": "en",
                     "subject": "",
                     "body": text,
+                    "text": text,
                     "action_intent": "ACTION_REQUIRED" if label == "positive" else "NO_ACTION_REQUIRED",
+                    "original_label": "ACTION_REQUIRED" if label == "positive" else "NO_ACTION_REQUIRED",
                     "source_dataset": "Charlie9/enron_intent_dataset_verified",
                     "source_file": filename,
                     "source_split": "unspecified",
+                    "original_split": "unspecified",
                     "source_id": str(index),
+                    "source_example_id": str(index),
                     "data_tier": "public_email_auxiliary",
                 }
             )

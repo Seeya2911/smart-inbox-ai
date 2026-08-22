@@ -44,6 +44,10 @@ data/raw/
 data/processed/
 data/*.jsonl
 artifacts/
+*.joblib
+*.pkl
+evaluation/results-*.json
+evaluation/intent_*.json
 
 # OS/editor files
 .DS_Store
