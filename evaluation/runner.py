@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
@@ -149,8 +148,8 @@ def provider_metadata(provider: Any, kind: str) -> Dict[str, Any]:
     """Record non-secret configuration needed to reproduce an evaluation."""
     metadata: Dict[str, Any] = {"provider": kind, "model": getattr(provider, "model", "unknown")}
     if kind == "openai-compatible":
-        metadata["base_url"] = os.getenv("LLM_BASE_URL", "default provider endpoint")
-        metadata["api_key_configured"] = bool(os.getenv("LLM_API_KEY"))
+        metadata["base_url"] = getattr(provider, "base_url", None)
+        metadata["api_key_configured"] = bool(getattr(provider, "api_key", None))
     else:
         metadata["base_url"] = None
         metadata["api_key_configured"] = False
