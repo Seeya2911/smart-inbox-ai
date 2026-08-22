@@ -15,21 +15,27 @@ LABEL_FIELDS = ("intent", "urgency", "priority")
 
 
 def load_cases(path: Path) -> List[Dict[str, Any]]:
+    """Load the repository's compact JSONL evaluation format."""
     cases: List[Dict[str, Any]] = []
     with path.open("r", encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, 1):
             if not line.strip():
                 continue
             try:
-                case = json.loads(line)
+                raw = json.loads(line)
             except json.JSONDecodeError as exc:
                 raise ValueError(f"Invalid JSON on line {line_number}") from exc
-            for required in ("id", "language", "email", "expected"):
-                if required not in case:
+            for required in ("id", "language", "subject", "body", *LABEL_FIELDS):
+                if required not in raw:
                     raise ValueError(f"Case {line_number} is missing '{required}'")
-            if case["language"] not in LANGUAGES:
-                raise ValueError(f"Unsupported evaluation language: {case['language']}")
-            cases.append(case)
+            if raw["language"] not in LANGUAGES:
+                raise ValueError(f"Unsupported evaluation language: {raw['language']}")
+            cases.append({
+                "id": raw["id"],
+                "language": raw["language"],
+                "email": {"subject": raw["subject"], "body": raw["body"]},
+                "expected": {field: raw[field] for field in LABEL_FIELDS},
+            })
     if not cases:
         raise ValueError("Evaluation corpus is empty")
     return cases
@@ -68,11 +74,12 @@ def evaluate(analyzer: EmailAnalyzer, cases: List[Dict[str, Any]]) -> Dict[str, 
     for case in cases:
         try:
             prediction = analyzer.analyze(case["email"]).to_dict()
-            grouped[case["language"]].append({"expected": case["expected"], "prediction": prediction})
+            grouped[case["language"]].append({"id": case["id"], "expected": case["expected"], "prediction": prediction})
         except Exception as exc:
             errors.append({"id": case["id"], "error": str(exc)})
 
     report: Dict[str, Any] = {"cases": len(cases), "errors": errors, "languages": {}}
+    all_rows = [row for rows in grouped.values() for row in rows]
     for language in LANGUAGES:
         rows = grouped.get(language, [])
         metrics = aggregate(rows)
@@ -80,7 +87,7 @@ def evaluate(analyzer: EmailAnalyzer, cases: List[Dict[str, Any]]) -> Dict[str, 
         metrics["language_match"] = round(accuracy(language_pairs), 4)
         metrics["language_disagreements"] = sum(bool(r["prediction"].get("language_disagreement")) for r in rows)
         report["languages"][language] = {"cases": len(rows), "metrics": metrics}
-    report["aggregate"] = aggregate(row for rows in grouped.values() for row in rows)
+    report["aggregate"] = aggregate(all_rows)
     return report
 
 
