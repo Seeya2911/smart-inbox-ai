@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+config.json
+
+# Runtime/application data
+*.log
+*.enc
+*_credentials.*
+encryption_key.key
+q_table.json
+reward_history.json
+message_context.json
+conversation_history.json
+message_history.csv
+feedback_data.json
+smart_inbox.db
+
+# Local model/cache artifacts
+models/
+.cache/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
