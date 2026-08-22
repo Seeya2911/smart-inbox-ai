@@ -107,9 +107,10 @@ class SmartSummarizerV3:
                 if len(current_words & previous_words) >= 2:
                     return "follow_up", 0.9
 
-        # Direct interrogatives are questions even when they mention meetings,
-        # appointments, calendars, or schedules. Scheduling is reserved for
-        # actual scheduling statements/requests.
+        social_patterns = [r"\bhow are you\b", r"\bwhat's up\b", r"\bhow's it going\b", r"\bhang out\b", r"\bparty\b"]
+        if any(re.search(pattern, normalized) for pattern in social_patterns):
+            return "social", 0.9
+
         if re.search(r"\?$", normalized) and re.match(r"^(what|how|when|where|why|which|who|is|are|can|could|would|do|does|did)\b", normalized):
             return "question", 0.9
 
@@ -117,7 +118,7 @@ class SmartSummarizerV3:
             ("complaint", [r"\bnot working\b", r"\bproblem\b", r"\bissue\b", r"\berror\b", r"\bbug\b", r"\bbroken\b"]),
             ("appreciation", [r"\bthank(?:s| you)?\b", r"\bappreciate\b", r"\bwell done\b", r"\bgreat job\b"]),
             ("urgent", [r"\burgent\b", r"\basap\b", r"\bemergency\b", r"\bcritical\b", r"\bimmediately\b"]),
-            ("social", [r"\bhow are you\b", r"\bwhat's up\b", r"\bhang out\b", r"\bparty\b"]),
+            ("social", social_patterns),
             ("informational", [r"\bfyi\b", r"\bfor your information\b", r"\bjust letting you know\b", r"\bheads up\b"]),
             ("confirmation", [r"\bconfirmed\b", r"\bgot it\b", r"\bunderstood\b", r"\bsounds good\b"]),
             ("schedule", [r"\bmeeting\b", r"\bappointment\b", r"\bschedule\b", r"\bcalendar\b"]),
