@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
@@ -144,6 +145,18 @@ def build_provider(kind: str):
     return MockLLMProvider() if kind == "mock" else OpenAICompatibleProvider()
 
 
+def provider_metadata(provider: Any, kind: str) -> Dict[str, Any]:
+    """Record non-secret configuration needed to reproduce an evaluation."""
+    metadata: Dict[str, Any] = {"provider": kind, "model": getattr(provider, "model", "unknown")}
+    if kind == "openai-compatible":
+        metadata["base_url"] = os.getenv("LLM_BASE_URL", "default provider endpoint")
+        metadata["api_key_configured"] = bool(os.getenv("LLM_API_KEY"))
+    else:
+        metadata["base_url"] = None
+        metadata["api_key_configured"] = False
+    return metadata
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--corpus", default="evaluation/multilingual_cases.jsonl")
@@ -152,8 +165,10 @@ def main() -> None:
     args = parser.parse_args()
 
     cases = load_cases(Path(args.corpus))
-    report = evaluate(EmailAnalyzer(build_provider(args.provider)), cases)
+    provider = build_provider(args.provider)
+    report = evaluate(EmailAnalyzer(provider), cases)
     report["baseline"] = evaluate_baseline(KeywordBaseline(), cases)
+    report["run"] = provider_metadata(provider, args.provider)
     report["comparison_note"] = (
         "The baseline is the repository's legacy keyword classifier adapted to the "
         "evaluation taxonomy. It is intentionally transparent and is not an ML model."
