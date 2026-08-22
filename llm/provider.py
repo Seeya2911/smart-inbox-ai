@@ -1,8 +1,7 @@
 """LLM provider abstractions.
 
 The application depends on this small interface instead of a vendor-specific SDK.
-OpenAI-compatible providers can be used for hosted or local inference (for example,
-Ollama's OpenAI-compatible endpoint).
+OpenAI-compatible providers can be used for hosted or local inference.
 """
 
 from __future__ import annotations
@@ -15,17 +14,33 @@ from typing import Any, Dict
 from .schemas import EmailAnalysis
 
 
-SYSTEM_PROMPT = """You are an email analysis assistant.
-Analyze the supplied email and return ONLY valid JSON with these keys:
-summary, intent, urgency, sentiment, priority, action_items, entities, reasoning, confidence.
+SYSTEM_PROMPT = """You are a multilingual email intelligence system.
+
+Read the ENTIRE supplied email (subject and body) and infer meaning from context.
+Do NOT classify using keyword presence alone. In particular, do not mark an email
+urgent merely because words such as 'urgent', 'asap', or their translations occur.
+Consider deadlines, requested actions, consequences, explicit and implicit intent,
+negation, modality, politeness, discourse context, and the relationship between
+sentences. Preserve the meaning of negation (for example, 'not urgent').
+
+First identify the language of the email. Supported languages are English (en),
+German (de), French (fr), and Spanish (es). If the message is too short or genuinely
+ambiguous, use 'unknown' rather than inventing a language.
+
+Return ONLY valid JSON with these keys:
+summary, intent, urgency, sentiment, priority, language, language_confidence,
+action_items, entities, reasoning, confidence.
 
 intent must be one of: request, question, meeting, notification, promotion, complaint,
 follow_up, information, other.
 urgency and priority must be one of: low, medium, high, critical.
 sentiment must be one of: negative, neutral, positive.
-confidence must be a number from 0 to 1.
-Do not invent facts that are not present in the message.
-Keep the summary concise and action_items empty when there are no concrete actions.
+language must be one of: en, de, fr, es, unknown.
+confidence and language_confidence must be numbers from 0 to 1.
+Do not invent facts, deadlines, entities, or actions that are not supported by the email.
+Keep the summary concise. Keep action_items empty when there are no concrete actions.
+Reasoning should briefly state the contextual evidence used for classification, not hidden
+chain-of-thought or private reasoning.
 """
 
 
@@ -38,13 +53,7 @@ class LLMProvider(ABC):
 
 
 class OpenAICompatibleProvider(LLMProvider):
-    """Call any OpenAI-compatible chat-completions endpoint.
-
-    Environment variables:
-    - LLM_API_KEY
-    - LLM_BASE_URL (optional; defaults to OpenAI)
-    - LLM_MODEL (default: gpt-4o-mini)
-    """
+    """Call any OpenAI-compatible chat-completions endpoint."""
 
     def __init__(
         self,
@@ -71,7 +80,13 @@ class OpenAICompatibleProvider(LLMProvider):
         if not body and not subject:
             raise ValueError("Cannot analyze an empty message")
 
-        user_content = f"Subject: {subject}\n\nBody:\n{body}".strip()
+        detected_language = str(message.get("detected_language", "unknown"))
+        detected_confidence = float(message.get("detected_language_confidence", 0.0))
+        user_content = (
+            f"Subject: {subject}\n\nBody:\n{body}\n\n"
+            f"Independent language detector: {detected_language} "
+            f"(confidence={detected_confidence:.3f}). Treat this only as a validation signal."
+        ).strip()
         response = self.client.chat.completions.create(
             model=self.model,
             temperature=0.1,
@@ -82,12 +97,19 @@ class OpenAICompatibleProvider(LLMProvider):
             ],
         )
         content = response.choices[0].message.content or "{}"
-        payload = json.loads(content)
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise ValueError("LLM returned invalid JSON") from exc
         return EmailAnalysis.from_dict(payload, model=self.model)
 
 
 class MockLLMProvider(LLMProvider):
-    """Deterministic provider for tests and credential-free demos."""
+    """Deterministic provider for tests and credential-free demos.
+
+    This provider intentionally uses simple rules and is explicitly NOT an LLM.
+    It exists to test the application contract and provide a reproducible baseline.
+    """
 
     def __init__(self, model: str = "mock-llm") -> None:
         self.model = model
@@ -97,6 +119,8 @@ class MockLLMProvider(LLMProvider):
         body = str(message.get("message_text", message.get("body", ""))).strip()
         text = f"{subject} {body}".strip()
         lowered = text.lower()
+        language = str(message.get("detected_language", "unknown"))
+        language_confidence = float(message.get("detected_language_confidence", 0.0))
 
         if any(word in lowered for word in ("urgent", "asap", "immediately")):
             urgency = priority = "high"
@@ -120,6 +144,8 @@ class MockLLMProvider(LLMProvider):
             urgency=urgency,
             sentiment=sentiment,
             priority=priority,
+            language=language if language in {"en", "de", "fr", "es"} else "unknown",
+            language_confidence=language_confidence,
             reasoning="Deterministic mock provider used for testing; not an LLM prediction.",
             confidence=0.5,
             model=self.model,
