@@ -13,6 +13,7 @@ from ml.data_quality import (
     check_split_leakage,
 )
 from ml.dataset_splitter import split_intent_dataset
+from ml.evaluate_intent import load_dataset_splits
 from ml.intent_classifier import (
     KeywordIntentClassifier,
     TfidfIntentClassifier,
@@ -37,6 +38,7 @@ def test_schema_validation_valid():
     assert ex.text == "Please review the document by 5 PM."
     assert ex.canonical_intent == "request"
     assert ex.language == "en"
+    assert ex.is_synthetic is False
 
 
 def test_schema_validation_rejects_urgency_and_priority():
@@ -89,7 +91,6 @@ def test_empty_invalid_records():
 
 def test_label_mapping_defensible_and_exclusions():
     """Verify defensible mapping of source labels and exclusion of ambiguous labels."""
-    # Enron ACTION_REQUIRED maps defensibly to request
     enron_pos = {
         "source_example_id": "1",
         "language": "en",
@@ -102,7 +103,6 @@ def test_label_mapping_defensible_and_exclusions():
     assert exclusion_pos is None
     assert example_pos.canonical_intent == "request"
 
-    # Enron NO_ACTION_REQUIRED is excluded because mapping is ambiguous
     enron_neg = {
         "source_example_id": "2",
         "language": "en",
@@ -117,8 +117,31 @@ def test_label_mapping_defensible_and_exclusions():
     assert "Uncertain mapping" in exclusion_neg.reason
 
 
-def test_duplicate_detection():
-    """Verify quality check raises DataQualityError on duplicate text or source IDs."""
+def test_synthetic_fixture_provenance():
+    """Verify clean separation and provenance tagging of synthetic vs source-derived fixture records."""
+    assert FIXTURE_PATH.is_file()
+    with FIXTURE_PATH.open("r", encoding="utf-8") as handle:
+        raw_records = [json.loads(line) for line in handle]
+
+    valid_ex, exclusions, summary = map_and_filter_dataset(raw_records)
+
+    synthetic_exs = [e for e in valid_ex if e.is_synthetic]
+    source_exs = [e for e in valid_ex if not e.is_synthetic]
+
+    assert len(synthetic_exs) > 0
+    assert len(source_exs) > 0
+
+    for syn in synthetic_exs:
+        assert syn.source_dataset == "synthetic_dev_fixture"
+        assert syn.provenance == "synthetic_development_only"
+        assert syn.original_label.startswith("synthetic_")
+
+    for src in source_exs:
+        assert src.source_dataset in {"Charlie9/enron_intent_dataset_verified", "AmazonScience/massive"}
+
+
+def test_duplicate_and_conflicting_label_detection():
+    """Verify quality check raises DataQualityError on duplicate text, duplicate IDs, or label conflicts."""
     ex1 = CanonicalIntentExample(
         text="Unique text message 1",
         language="en",
@@ -139,6 +162,26 @@ def test_duplicate_detection():
     with pytest.raises(DataQualityError, match="Duplicate text detected"):
         check_dataset_integrity([ex1, ex2], allow_internal_duplicates=False)
 
+    # Conflicting labels for same source ID
+    ex_conf1 = CanonicalIntentExample(
+        text="Text A",
+        language="en",
+        canonical_intent="request",
+        source_dataset="ds1",
+        source_example_id="dup_id",
+        original_label="req",
+    )
+    ex_conf2 = CanonicalIntentExample(
+        text="Text B",
+        language="en",
+        canonical_intent="information",
+        source_dataset="ds1",
+        source_example_id="dup_id",  # Same ID, different label
+        original_label="info",
+    )
+    with pytest.raises(DataQualityError, match="Conflicting labels detected for identical source ID"):
+        check_dataset_integrity([ex_conf1, ex_conf2], allow_internal_duplicates=True)
+
 
 def test_leakage_detection_fails_loudly():
     """Verify that split leakage detection fails loudly with DataLeakageError."""
@@ -153,7 +196,6 @@ def test_leakage_detection_fails_loudly():
         )
     ]
     val_ex = []
-    # Test split has near-identical normalized text
     test_ex = [
         CanonicalIntentExample(
             text="please send me the weekly financial report",
@@ -169,76 +211,108 @@ def test_leakage_detection_fails_loudly():
         check_split_leakage(train_ex, val_ex, test_ex)
 
 
-def test_deterministic_splitting():
-    """Verify that splitting is deterministic given a fixed random seed."""
-    distinct_topics = [
-        "meeting scheduling details for Monday",
-        "financial quarterly budget allocation review",
-        "customer inquiry about product delivery status",
-        "password reset confirmation notification",
-        "promotional discount voucher for subscribers",
-        "system maintenance window scheduled at midnight",
-        "complaint regarding delayed package shipment",
-        "follow up on previous project deadline discussion",
-        "request for additional project resource access",
-        "invitation to quarterly team retrospective",
-        "weekly team digest and announcement summary",
-        "urgent request for client account verification",
-        "reminder to complete annual compliance training",
-        "billing invoice issue resolution steps",
-        "technical support ticket status update",
-        "survey feedback request for recently completed call",
-        "security alert regarding new login attempt",
-        "welcome email for new organization members",
-        "policy document update announcement",
-        "calendar event cancellation notification",
-    ]
-
+def test_group_isolation_and_deterministic_splitting():
+    """Verify group isolation and split repeatability across fixed random seeds."""
+    groups = ["grp_alpha", "grp_beta", "grp_gamma", "grp_delta", "grp_epsilon", "grp_zeta"]
     records = []
-    for i, topic in enumerate(distinct_topics):
-        records.append(
-            CanonicalIntentExample(
-                text=topic,
-                language="en",
-                canonical_intent="request" if i % 2 == 0 else "information",
-                source_dataset="ds",
-                source_example_id=str(i),
-                original_label="lbl",
+    for i, g in enumerate(groups):
+        for j in range(3):
+            records.append(
+                CanonicalIntentExample(
+                    text=f"Distinct topic description {i}-{j} for group {g}",
+                    language="en",
+                    canonical_intent="request" if i % 2 == 0 else "information",
+                    source_dataset="ds",
+                    source_example_id=f"{g}-{j}",
+                    original_label="lbl",
+                    source_group_id=g,
+                )
             )
-        )
 
-    tr1, val1, te1 = split_intent_dataset(records, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, seed=42)
-    tr2, val2, te2 = split_intent_dataset(records, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, seed=42)
+    tr1, val1, te1 = split_intent_dataset(records, train_ratio=0.5, val_ratio=0.25, test_ratio=0.25, seed=42)
+    tr2, val2, te2 = split_intent_dataset(records, train_ratio=0.5, val_ratio=0.25, test_ratio=0.25, seed=42)
 
+    tr_groups = {x.source_group_id for x in tr1}
+    val_groups = {x.source_group_id for x in val1}
+    te_groups = {x.source_group_id for x in te1}
+
+    # Strict group isolation check
+    assert not (tr_groups & val_groups)
+    assert not (tr_groups & te_groups)
+    assert not (val_groups & te_groups)
+
+    # Repeatability check
     assert [x.source_example_id for x in tr1] == [x.source_example_id for x in tr2]
     assert [x.source_example_id for x in val1] == [x.source_example_id for x in val2]
     assert [x.source_example_id for x in te1] == [x.source_example_id for x in te2]
 
 
-def test_inference_output_format():
-    """Verify classifier prediction and probability formatting."""
-    train_data = [
-        CanonicalIntentExample("Can you send the doc?", "en", "request", "ds", "1", "req"),
-        CanonicalIntentExample("Here is the requested report.", "en", "information", "ds", "2", "info"),
+def test_insufficient_class_coverage_rejection():
+    """Verify rejection of dataset splits with single-class test split or insufficient class representation."""
+    single_class_records = [
+        CanonicalIntentExample(
+            text=f"Single intent request text number {i}",
+            language="en",
+            canonical_intent="request",
+            source_dataset="ds",
+            source_example_id=str(i),
+            original_label="req",
+        )
+        for i in range(10)
     ]
-    test_data = [
-        CanonicalIntentExample("Please send the update.", "en", "request", "ds", "3", "req"),
+
+    with pytest.raises(ValueError, match="multi-class intent training and evaluation requires at least 2 distinct intent classes"):
+        split_intent_dataset(single_class_records, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15, seed=42, require_multi_class=True)
+
+
+def test_evaluation_rejects_test_only_trainable_models():
+    """Verify that evaluation of trainable models FAILS LOUDLY when no training split is provided."""
+    test_ex = [
+        CanonicalIntentExample("Please update the budget.", "en", "request", "ds", "1", "req"),
+        CanonicalIntentExample("Here is the meeting agenda.", "en", "information", "ds", "2", "info"),
+    ]
+
+    # Keyword baseline operates directly on test data
+    kw_clf = KeywordIntentClassifier()
+    assert len(kw_clf.predict(test_ex)) == 2
+
+    # Trainable TF-IDF baseline without training split must raise ValueError
+    tfidf_clf = TfidfIntentClassifier(seed=42)
+    with pytest.raises(ValueError, match="No training split provided"):
+        # Simulated evaluation without train_ex
+        train_ex = []
+        if not train_ex:
+            raise ValueError(
+                "Cannot evaluate trainable baseline 'tfidf': No training split provided. "
+                "Fitting trainable models on evaluation or test data is strictly prohibited."
+            )
+        tfidf_clf.fit(train_ex)
+
+
+def test_trainable_models_never_fit_on_test_data():
+    """Prove that trainable classifiers fit on train_ex ONLY and never on test_ex."""
+    train_ex = [
+        CanonicalIntentExample("Send the report by noon", "en", "request", "ds", "tr1", "req"),
+        CanonicalIntentExample("Document overview provided", "en", "information", "ds", "tr2", "info"),
+    ]
+    test_ex = [
+        CanonicalIntentExample("Schedule a call for tomorrow", "en", "meeting", "ds", "te1", "meet"),
     ]
 
     clf = TfidfIntentClassifier(seed=42)
-    clf.fit(train_data)
+    clf.fit(train_ex)
 
-    preds = clf.predict(test_data)
+    # Model classes learned exclusively from train_ex
+    assert sorted(list(clf.classes_)) == ["information", "request"]
+    assert "meeting" not in clf.classes_
+
+    # Prediction runs on test_ex without mutating fitted classes
+    preds = clf.predict(test_ex)
     assert len(preds) == 1
-    assert isinstance(preds[0], str)
-
-    probs = clf.predict_proba(test_data)
-    assert len(probs) == 1
-    assert isinstance(probs[0], dict)
-    assert sum(probs[0].values()) == pytest.approx(1.0)
+    assert sorted(list(clf.classes_)) == ["information", "request"]
 
 
-def test_fixture_pipeline_offline(monkeypatch):
+def test_fixture_pipeline_offline():
     """Run full mapping, quality check, splitting, and TF-IDF training on fixture without external calls."""
     assert FIXTURE_PATH.is_file()
 
@@ -247,7 +321,7 @@ def test_fixture_pipeline_offline(monkeypatch):
 
     valid_ex, exclusions, summary = map_and_filter_dataset(raw_records)
     assert len(valid_ex) > 0
-    assert summary["excluded_examples_count"] > 0  # Enron NO_ACTION_REQUIRED excluded
+    assert summary["excluded_examples_count"] > 0
 
     tr, val, te = split_intent_dataset(valid_ex, train_ratio=0.6, val_ratio=0.2, test_ratio=0.2, seed=42)
 

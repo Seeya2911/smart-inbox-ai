@@ -222,6 +222,11 @@ def main() -> None:
         "validation_metrics": val_metrics,
         "test_metrics": test_metrics,
     }
+    if len(valid_examples) < 50:
+        summary_out["pipeline_note"] = (
+            f"The training dataset contains only {len(valid_examples)} cases. "
+            "Small development datasets/fixtures are used exclusively for pipeline mechanics validation and MUST NOT be presented as real-world model benchmarks."
+        )
     print(json.dumps(summary_out, indent=2))
 
 

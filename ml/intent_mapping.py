@@ -45,6 +45,7 @@ class ExclusionRecord:
 def resolve_canonical_intent(
     source_dataset: str,
     original_label: str,
+    raw_intent: str = "",
     custom_mapping: Optional[Dict[str, str]] = None,
 ) -> Tuple[Optional[str], str]:
     """Resolve original label to canonical intent or provide exclusion reason.
@@ -63,6 +64,12 @@ def resolve_canonical_intent(
         return original_label.lower(), ""
 
     dataset_lower = source_dataset.lower()
+
+    if "synthetic" in dataset_lower:
+        target = raw_intent.lower() if raw_intent else original_label.lower()
+        if target in ALLOWED_INTENTS:
+            return target, ""
+        return None, f"Synthetic intent label '{target}' is not in ALLOWED_INTENTS"
 
     if "enron" in dataset_lower:
         if original_label in ENRON_INTENT_MAPPING:
@@ -94,8 +101,14 @@ def map_raw_record(
     original_label = str(
         raw_record.get("original_label", raw_record.get("action_intent", raw_record.get("intent", raw_record.get("source_intent", ""))))
     ).strip()
+    raw_intent = str(raw_record.get("intent", raw_record.get("canonical_intent", ""))).strip()
 
-    canonical_intent, exclusion_reason = resolve_canonical_intent(source_dataset, original_label, custom_mapping)
+    canonical_intent, exclusion_reason = resolve_canonical_intent(
+        source_dataset=source_dataset,
+        original_label=original_label,
+        raw_intent=raw_intent,
+        custom_mapping=custom_mapping,
+    )
 
     if canonical_intent is None:
         exclusion = ExclusionRecord(

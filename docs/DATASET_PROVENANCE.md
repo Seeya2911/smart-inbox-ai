@@ -34,14 +34,23 @@ The project will use a **multi-source training strategy**:
 
 No source will be silently remapped into a Smart Inbox label when the original semantics do not support that mapping. Any mapping will be documented and counted in the dataset manifest.
 
-### INTENT Pipeline Specific Label Policy
+### INTENT Pipeline Specific Label & Evaluation Policy
 
-For the first reproducible supervised NLP training pipeline:
+For the reproducible supervised INTENT training pipeline:
 - **INTENT Task Only**: Urgency and Priority are intentionally **NOT** part of this training stage.
 - **Defensible Label Mapping**:
   - Enron `ACTION_REQUIRED` maps defensibly to `request`.
   - Enron `NO_ACTION_REQUIRED` is **excluded from supervised training** (recorded reason: "Uncertain mapping: NO_ACTION_REQUIRED does not map confidently to a single Smart Inbox intent class").
   - MASSIVE email intents (`email_sendemail`, `email_addcontact` -> `request`; `email_query`, `email_querycontact` -> `information`) map defensibly; non-email intents are excluded as outside taxonomy.
+- **Evaluation Training Fallback Prohibition**:
+  - Evaluation of trainable models (`TfidfIntentClassifier` or `EmbeddingIntentClassifier`) **MUST NEVER** fit parameters on test or evaluation data.
+  - Evaluation without a genuine training split or pre-trained model artifact **FAILS LOUDLY (`ValueError`)**.
+- **Group-Aware Stratified Splitting**:
+  - All examples sharing a `source_group_id` **MUST remain in exactly ONE split** to prevent cross-split leakage.
+  - Splitting uses deterministic greedy group bin-packing to balance class distributions across train, val, and test partitions.
+- **Fixture Development Policy**:
+  - Compact development fixtures (such as `tests/fixtures/intent_sample.jsonl`) exist exclusively for unit testing and pipeline mechanics validation.
+  - Development fixture metrics MUST NOT be presented as real-world model performance claims.
 - **Foundation Model Attributions**:
   - `sentence-transformers/paraphrase-multilingual-mpnet-base-v2` is used strictly as a pretrained representation model.
   - The foundation model itself was NOT created or trained by us.
