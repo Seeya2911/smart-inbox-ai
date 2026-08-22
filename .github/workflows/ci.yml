@@ -2,7 +2,9 @@ name: Smart Inbox CI
 
 on:
   push:
-    branches: [main, feature/llm-modernization]
+    branches:
+      - main
+      - "feature/**"
   pull_request:
     branches: [main]
 
