@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from evaluation.runner import evaluate, load_cases
+from evaluation.runner import KeywordBaseline, evaluate, evaluate_baseline, load_cases
 from llm.analyzer import EmailAnalyzer
 from llm.provider import MockLLMProvider
 
@@ -24,3 +24,12 @@ def test_evaluation_report_has_per_language_metrics():
         assert language["cases"] == 3
         assert 0.0 <= language["metrics"]["intent"]["accuracy"] <= 1.0
         assert 0.0 <= language["metrics"]["urgency"]["macro_f1"] <= 1.0
+
+
+def test_keyword_baseline_uses_same_evaluation_schema():
+    cases = load_cases(CORPUS)
+    report = evaluate_baseline(KeywordBaseline(), cases)
+    assert set(report["languages"]) == {"en", "de", "fr", "es"}
+    assert report["aggregate"]["intent"]["accuracy"] >= 0.0
+    assert report["aggregate"]["urgency"]["macro_f1"] >= 0.0
+    assert report["aggregate"]["priority"]["macro_f1"] >= 0.0
