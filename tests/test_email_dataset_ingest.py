@@ -44,7 +44,7 @@ def test_normalize_phishing_filters_already_ingested_sources() -> None:
         "train",
     )
     assert record is not None
-    assert record.id == "phishing_CEAS-08:9"
+    assert record.id == "phishing_corpus_CEAS-08:9"
     assert record.source == "phishing_corpus"
     assert record.source_dataset == "CEAS-08"
     assert record.source_label == "1"
