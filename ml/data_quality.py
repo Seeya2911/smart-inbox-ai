@@ -8,11 +8,11 @@ The pipeline FAILS LOUDLY if data leakage or data quality violations are detecte
 """
 from __future__ import annotations
 
-import re
 from collections import defaultdict
 from typing import Dict, List, Set, Tuple
 
 from ml.schema import ALLOWED_INTENTS, CanonicalIntentExample
+from ml.text_normalization import normalize_text
 
 
 class DataQualityError(ValueError):
@@ -21,15 +21,6 @@ class DataQualityError(ValueError):
 
 class DataLeakageError(ValueError):
     """Raised when leakage is detected between train, validation, or test splits."""
-
-
-def normalize_text(text: str) -> str:
-    """Normalize text by lowercasing and collapsing whitespace."""
-    if not text:
-        return ""
-    cleaned = text.lower()
-    cleaned = re.sub(r"\s+", " ", cleaned)
-    return cleaned.strip()
 
 
 def compute_ngram_jaccard(text1: str, text2: str, n: int = 4) -> float:

@@ -33,9 +33,15 @@ from __future__ import annotations
 import argparse
 import json
 import tempfile
+from collections import defaultdict
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List, Tuple
 from urllib.request import Request, urlopen
+
+if __package__:
+    from .text_normalization import normalize_text
+else:
+    from text_normalization import normalize_text
 
 SOURCE_INTENTS: Dict[str, str] = {
     "email_query": "INFORMATION",
@@ -89,6 +95,34 @@ def download_parquet(destination: Path) -> None:
             handle.write(chunk)
 
 
+def deduplicate_rows(rows: List[Dict[str, str]]) -> Tuple[List[Dict[str, str]], int]:
+    """Deduplicate MASSIVE rows by the pipeline's normalized canonical text.
+
+    MASSIVE rows have an empty subject, so their canonical training text is their
+    ``body``.  The lowest ``source_id`` is retained as a stable representative.
+    A duplicate text with different mapped labels is invalid source data and must
+    be corrected rather than silently merged.
+    """
+    grouped_rows: Dict[str, List[Dict[str, str]]] = defaultdict(list)
+    for row in rows:
+        grouped_rows[normalize_text(row["body"])].append(row)
+
+    deduplicated: List[Dict[str, str]] = []
+    for normalized_text in sorted(grouped_rows):
+        duplicate_group = grouped_rows[normalized_text]
+        labels = {row["intent"] for row in duplicate_group}
+        if len(labels) > 1:
+            source_ids = sorted(row["source_id"] for row in duplicate_group)
+            raise ValueError(
+                "Conflicting mapped labels for duplicate MASSIVE text "
+                f"{normalized_text[:80]!r}: labels={sorted(labels)}, source_ids={source_ids}"
+            )
+        deduplicated.append(min(duplicate_group, key=lambda row: (row["source_id"], row["id"])))
+
+    deduplicated.sort(key=lambda row: (row["source_id"], row["id"]))
+    return deduplicated, len(rows) - len(deduplicated)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True, help="Output JSONL path")
@@ -139,6 +173,9 @@ def main() -> None:
     if not rows:
         raise SystemExit("No matching MASSIVE email-intent examples were found.")
 
+    rows_before_deduplication = len(rows)
+    rows, duplicates_removed = deduplicate_rows(rows)
+
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8") as handle:
@@ -150,6 +187,8 @@ def main() -> None:
             {
                 "output": str(output),
                 "rows": len(rows),
+                "rows_before_deduplication": rows_before_deduplication,
+                "duplicates_removed": duplicates_removed,
                 "language": LANGUAGE,
                 "locale": LOCALE,
             },
