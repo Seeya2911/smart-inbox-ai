@@ -1,13 +1,8 @@
-"""Lightweight intent rule engine for weak labeling.
-
-Evaluates email text and returns heuristic weak intent label, score, and reasons.
-Supports canonical taxonomy: SECURITY, TRANSACTIONAL, MEETING, REQUEST, QUESTION,
-NOTIFICATION, PROMOTION, COMPLAINT, FOLLOW_UP, INFORMATION, OTHER.
-"""
+"""Lightweight intent rule engine for weak labeling."""
 from __future__ import annotations
 
 import re
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 
 INTENT_PATTERNS: Dict[str, Dict[str, Any]] = {
@@ -76,26 +71,20 @@ class IntentRuleEngine:
         sbj_lower = (subject or "").lower()
         bdy_lower = (body or "").lower()
         full_text = f"{sbj_lower}\n{bdy_lower}".strip()
-
         scores: Dict[str, float] = {}
         reasonings: Dict[str, List[str]] = {}
 
         for intent, config in self.patterns.items():
             score = 0.0
-            reasons = []
-
-            # Subject pattern match
+            reasons: List[str] = []
             for sp in config["subject_patterns"]:
                 if re.search(sp, sbj_lower):
                     score += 2.0
                     reasons.append(f"Subject pattern '{sp}' matched")
-
-            # Keyword match
             kw_count = sum(1 for kw in config["keywords"] if kw in full_text)
             if kw_count > 0:
-                score += kw_count * 1.0
+                score += kw_count
                 reasons.append(f"{kw_count} keyword(s) matched")
-
             score *= config["weight"]
             scores[intent] = score
             reasonings[intent] = reasons
@@ -104,5 +93,4 @@ class IntentRuleEngine:
         if max_score >= 2.0:
             best_intent = max(scores, key=scores.get)
             return best_intent, scores[best_intent], reasonings[best_intent]
-
         return self.default_intent, 0.5, ["No strong intent pattern matched"]
