@@ -6,7 +6,7 @@ supporting full provenance tracking, ID namespacing, and weak labeling metadata.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Set
 
 ALLOWED_INTENTS: Set[str] = {
     "request",
@@ -36,25 +36,27 @@ ALLOWED_LABEL_SOURCES: Set[str] = {
     "ground_truth",
 }
 
-VALID_SOURCE_PREFIXES: Set[str] = {"enron", "spam", "synthetic", "inbox"}
+VALID_SOURCE_PREFIXES: Set[str] = {"enron", "spam", "phishing", "synthetic", "inbox"}
 SUPPORTED_LANGUAGES: Set[str] = {"en", "de", "fr", "es", "unknown"}
 
 
 def format_namespaced_id(source: str, raw_id: str) -> str:
-    """Format raw example ID with source namespace prefix (e.g. enron_00123)."""
+    """Format raw example ID with a source namespace prefix."""
     raw = str(raw_id).strip()
     if not raw:
         raw = "000000"
     for prefix in VALID_SOURCE_PREFIXES:
         if raw.startswith(f"{prefix}_"):
             return raw
-    # Derive prefix from source string
+
     src_lower = str(source).lower().strip()
     prefix = "inbox"
     if "enron" in src_lower:
         prefix = "enron"
     elif "spam" in src_lower:
         prefix = "spam"
+    elif "phishing" in src_lower:
+        prefix = "phishing"
     elif "synthetic" in src_lower:
         prefix = "synthetic"
     return f"{prefix}_{raw}"
@@ -103,12 +105,10 @@ class CanonicalEmailExample:
         return f"Subject: {sbj}\nBody: {bdy}".strip() if sbj else bdy
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary representation."""
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> CanonicalEmailExample:
-        """Validate and create a CanonicalEmailExample from dictionary."""
+    def from_dict(cls, data: Dict[str, Any]) -> "CanonicalEmailExample":
         source = str(data.get("source", data.get("source_dataset", "synthetic"))).strip()
         raw_id = str(data.get("id", data.get("source_example_id", "000000"))).strip()
         namespaced_id = format_namespaced_id(source, raw_id)
@@ -134,7 +134,6 @@ class CanonicalEmailExample:
             confidence = float(data.get("label_confidence", 1.0))
         except (ValueError, TypeError):
             confidence = 1.0
-
         try:
             rule_score = float(data.get("rule_score", 0.0))
         except (ValueError, TypeError):
@@ -190,12 +189,10 @@ class CanonicalIntentExample:
             raise ValueError("original_label must be a string")
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert canonical example to dictionary representation."""
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> CanonicalIntentExample:
-        """Validate and create a CanonicalIntentExample from a dictionary."""
+    def from_dict(cls, data: Dict[str, Any]) -> "CanonicalIntentExample":
         forbidden = {"urgency", "priority"} & set(data.keys())
         if forbidden:
             raise ValueError(
