@@ -33,12 +33,15 @@ from __future__ import annotations
 import argparse
 import json
 import tempfile
-from pathlib import Path
 from collections import defaultdict
+from pathlib import Path
 from typing import Dict, List, Tuple
 from urllib.request import Request, urlopen
 
-from ml.data_quality import normalize_text
+if __package__:
+    from .text_normalization import normalize_text
+else:
+    from text_normalization import normalize_text
 
 SOURCE_INTENTS: Dict[str, str] = {
     "email_query": "INFORMATION",

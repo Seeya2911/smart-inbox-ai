@@ -1,3 +1,7 @@
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 from ml.prepare_massive_email import deduplicate_rows
@@ -42,3 +46,23 @@ def test_deduplicate_rows_rejects_conflicting_labels():
 
     with pytest.raises(ValueError, match="Conflicting mapped labels"):
         deduplicate_rows(rows)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        [sys.executable, "ml/prepare_massive_email.py", "--help"],
+        [sys.executable, "-m", "ml.prepare_massive_email", "--help"],
+    ],
+)
+def test_prepare_massive_email_supports_documented_invocations(command):
+    result = subprocess.run(
+        command,
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "--output OUTPUT" in result.stdout
