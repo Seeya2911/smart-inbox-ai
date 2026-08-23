@@ -34,27 +34,20 @@ The project will use a **multi-source training strategy**:
 
 No source will be silently remapped into a Smart Inbox label when the original semantics do not support that mapping. Any mapping will be documented and counted in the dataset manifest.
 
-### INTENT Pipeline Specific Label & Evaluation Policy
+### Multi-Output Priority + Intent Pipeline Policy
 
-For the reproducible supervised INTENT training pipeline:
-- **INTENT Task Only**: Urgency and Priority are intentionally **NOT** part of this training stage.
-- **Defensible Label Mapping**:
-  - Enron `ACTION_REQUIRED` maps defensibly to `request`.
-  - Enron `NO_ACTION_REQUIRED` is **excluded from supervised training** (recorded reason: "Uncertain mapping: NO_ACTION_REQUIRED does not map confidently to a single Smart Inbox intent class").
-  - MASSIVE email intents (`email_sendemail`, `email_addcontact` -> `request`; `email_query`, `email_querycontact` -> `information`) map defensibly; non-email intents are excluded as outside taxonomy.
-- **Evaluation Training Fallback Prohibition**:
-  - Evaluation of trainable models (`TfidfIntentClassifier` or `EmbeddingIntentClassifier`) **MUST NEVER** fit parameters on test or evaluation data.
-  - Evaluation without a genuine training split or pre-trained model artifact **FAILS LOUDLY (`ValueError`)**.
-- **Group-Aware Stratified Splitting**:
-  - All examples sharing a `source_group_id` **MUST remain in exactly ONE split** to prevent cross-split leakage.
-  - Splitting uses deterministic greedy group bin-packing to balance class distributions across train, val, and test partitions.
-- **Fixture Development Policy**:
-  - Compact development fixtures (such as `tests/fixtures/intent_sample.jsonl`) exist exclusively for unit testing and pipeline mechanics validation.
-  - Development fixture metrics MUST NOT be presented as real-world model performance claims.
+For the multi-output supervised NLP training pipeline:
+- **Dual Independent Head Prediction**: `INTENT` and `PRIORITY` are predicted independently by separate classification heads (`intent_head` and `priority_head`).
+- **Canonical Taxonomy**:
+  - `INTENT`: `SECURITY`, `TRANSACTIONAL`, `MEETING`, `REQUEST`, `QUESTION`, `NOTIFICATION`, `PROMOTION`, `COMPLAINT`, `FOLLOW_UP`, `INFORMATION`, `OTHER`.
+  - `PRIORITY`: `HIGH`, `MEDIUM`, `LOW`.
+- **Dual Weak Supervision**: `ml.weak_labeler` combines heuristic rules from `priority_tagging.py` (`rule_score` + priority) and `ml.intent_rules` (intent) to produce pseudo-labels for high-confidence training candidates.
+- **ID Namespacing**: Every example ID is explicitly prefixed by its source (`enron_*`, `spam_*`, `synthetic_*`, `inbox_*`) to guarantee unique identifier resolution across merged datasets.
+- **Boilerplate Stripping**: Signature lines, quoted chains (`> ...`), forward headers, and legal disclaimers are stripped BEFORE hashing or deduplication.
+- **Gold Test Set Isolation Invariant**: `gold/test.jsonl` is a hand-labeled evaluation split that is **STRICTLY PROHIBITED** from being used during model training, hyperparameter tuning, or pseudo-labeling. Unit tests enforce zero ID or text overlap between `gold/test.jsonl` and any training split.
 - **Foundation Model Attributions**:
-  - `sentence-transformers/paraphrase-multilingual-mpnet-base-v2` is used strictly as a pretrained representation model.
-  - The foundation model itself was NOT created or trained by us.
-  - The downstream intent classification heads are trained locally by this project.
+  - Pretrained transformer sentence encoders (such as `sentence-transformers/paraphrase-multilingual-mpnet-base-v2`) are used strictly as frozen representation layers.
+  - Downstream classification heads are trained locally by this project.
 
 ## Label policy
 
