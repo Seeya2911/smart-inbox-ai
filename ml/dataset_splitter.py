@@ -87,13 +87,11 @@ def _near_duplicate_group_ids(
     # that candidate expansion remains deterministic and inexpensive in CI.
     token_to_indices: Dict[str, Set[int]] = defaultdict(set)
     token_sets: List[Set[str]] = []
-    ngram_sets: List[Set[str]] = []
     for index, text in enumerate(normalized):
         tokens = set(text.split())
         token_sets.append(tokens)
         for token in tokens:
             token_to_indices[token].add(index)
-        ngram_sets.append({text[pos : pos + 4] for pos in range(max(0, len(text) - 3))})
 
     for index, text in enumerate(normalized):
         if len(text) < 15:
@@ -172,7 +170,7 @@ def split_intent_dataset(
     component_ids = _near_duplicate_group_ids(examples, threshold=near_duplicate_threshold)
     group_to_examples: Dict[str, List[CanonicalIntentExample]] = defaultdict(list)
     for index, example in enumerate(examples):
-        group_to_examples[f"cluster-{component_ids[index]}"] .append(example)
+        group_to_examples[f"cluster-{component_ids[index]}"].append(example)
 
     group_ids = sorted(group_to_examples)
     group_class_counts: Dict[str, Dict[str, int]] = {}
