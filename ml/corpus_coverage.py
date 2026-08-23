@@ -46,7 +46,8 @@ def analyze_corpora(paths: Iterable[Path]) -> dict[str, Any]:
     source_counts: Counter[str] = Counter()
     source_labels: dict[str, Counter[str]] = defaultdict(Counter)
     languages: Counter[str] = Counter()
-    duplicate_groups: dict[str, set[str]] = defaultdict(set)
+    duplicate_counts: Counter[str] = Counter()
+    duplicate_sources: dict[str, set[str]] = defaultdict(set)
     source_row_counts: Counter[str] = Counter()
     empty_rows = 0
     body_lengths: list[int] = []
@@ -75,10 +76,14 @@ def analyze_corpora(paths: Iterable[Path]) -> dict[str, Any]:
 
         normalized = normalize_content(subject, body)
         if normalized:
-            duplicate_groups[normalized].add(source)
+            duplicate_counts[normalized] += 1
+            duplicate_sources[normalized].add(source)
 
-    cross_source_duplicate_groups = sum(1 for sources in duplicate_groups.values() if len(sources) > 1)
-    exact_duplicate_groups = sum(1 for sources in duplicate_groups.values() if len(sources) >= 1)
+    exact_duplicate_groups = sum(1 for count in duplicate_counts.values() if count > 1)
+    cross_source_duplicate_groups = sum(
+        1 for normalized, count in duplicate_counts.items()
+        if count > 1 and len(duplicate_sources[normalized]) > 1
+    )
 
     def stats(values: list[int]) -> dict[str, float | int]:
         if not values:
@@ -103,8 +108,8 @@ def analyze_corpora(paths: Iterable[Path]) -> dict[str, Any]:
         "empty_content_rows": empty_rows,
         "subject_length": stats(subject_lengths),
         "body_length": stats(body_lengths),
-        "unique_normalized_content": len(duplicate_groups),
-        "exact_duplicate_groups": total - len(duplicate_groups),
+        "unique_normalized_content": len(duplicate_counts),
+        "exact_duplicate_groups": exact_duplicate_groups,
         "cross_source_exact_duplicate_groups": cross_source_duplicate_groups,
         "source_row_counts": dict(sorted(source_row_counts.items())),
     }
