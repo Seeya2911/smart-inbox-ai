@@ -19,7 +19,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -29,8 +29,8 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install exporter dependency
-        run: python -m pip install --disable-pip-version-check openpyxl
+      - name: Install exporter and Enron dependencies
+        run: python -m pip install --disable-pip-version-check openpyxl pyarrow
 
       - name: Create workspace
         run: mkdir -p data/manus_build
