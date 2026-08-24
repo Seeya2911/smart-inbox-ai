@@ -40,6 +40,30 @@ def test_message_text_extracts_subject_and_plain_body() -> None:
     assert body == "Please review this message."
 
 
+def test_iter_source_uses_direct_enron_path(monkeypatch) -> None:
+    expected = ingest.RawEmailRecord(
+        "enron_42", "Project update", "The work is progressing.", "enron", "42", "train", "corbt/enron-emails"
+    )
+
+    def fake_direct(*, max_rows: int | None, sleep_seconds: float):
+        assert max_rows == 4000
+        assert sleep_seconds == 0
+        yield expected
+
+    def fail_rows(*args, **kwargs):
+        raise AssertionError("Enron must not use the Hugging Face rows API")
+
+    monkeypatch.setattr(ingest, "iter_enron_direct", fake_direct)
+    monkeypatch.setattr(ingest, "_request_rows", fail_rows)
+    rows = list(
+        ingest.iter_source(
+            dataset="corbt/enron-emails", config="default", split="train", source="enron",
+            max_rows=4000, batch_size=100, sleep_seconds=0,
+        )
+    )
+    assert rows == [expected]
+
+
 def test_iter_source_uses_direct_spamassassin_path(monkeypatch) -> None:
     expected = ingest.RawEmailRecord(
         "spam_corpus_mail-1", "Offer", "Body", "spam_corpus", "mail-1", "train", "talby/spamassassin", "spam"
@@ -134,18 +158,6 @@ def test_write_jsonl_keeps_raw_records_unlabeled(tmp_path) -> None:
     assert payload["id"] == "enron_1"
     assert "intent" not in payload
     assert "priority" not in payload
-
-
-def test_iter_source_honors_max_rows(monkeypatch) -> None:
-    calls: list[tuple[int, int]] = []
-    def fake_request(dataset: str, config: str, split: str, offset: int, length: int):
-        calls.append((offset, length))
-        return [{"id": str(offset), "text": f"Subject: S{offset}\nbody"}]
-    monkeypatch.setattr(ingest, "_request_rows", fake_request)
-    rows = list(ingest.iter_source(dataset="example", config="default", split="train", source="enron",
-                                    max_rows=2, batch_size=1, sleep_seconds=0))
-    assert len(rows) == 2
-    assert calls == [(0, 1), (1, 1)]
 
 
 def test_request_rows_retries_http_429(monkeypatch) -> None:
