@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import email
+import io
 import json
 import urllib.error
 
@@ -27,6 +29,40 @@ def test_normalize_spamassassin_preserves_source_label_without_mapping_it() -> N
     assert record.source_dataset == "talby/spamassassin"
     assert record.source_label == "spam"
     assert record.subject == "Special offer"
+
+
+def test_message_text_extracts_subject_and_plain_body() -> None:
+    message = email.message.EmailMessage()
+    message["Subject"] = "Account notice"
+    message.set_content("Please review this message.")
+    subject, body = ingest._message_text(message.as_bytes())
+    assert subject == "Account notice"
+    assert body == "Please review this message."
+
+
+def test_iter_source_uses_direct_spamassassin_path(monkeypatch) -> None:
+    expected = ingest.RawEmailRecord(
+        "spam_corpus_mail-1", "Offer", "Body", "spam_corpus", "mail-1", "train", "talby/spamassassin", "spam"
+    )
+    calls: list[tuple[int | None, float]] = []
+
+    def fake_direct(*, max_rows: int | None, sleep_seconds: float):
+        calls.append((max_rows, sleep_seconds))
+        yield expected
+
+    def fail_rows(*args, **kwargs):
+        raise AssertionError("SpamAssassin must not use the Hugging Face rows API")
+
+    monkeypatch.setattr(ingest, "iter_spamassassin_direct", fake_direct)
+    monkeypatch.setattr(ingest, "_request_rows", fail_rows)
+    rows = list(
+        ingest.iter_source(
+            dataset="talby/spamassassin", config="text", split="train", source="spam_corpus",
+            max_rows=3000, batch_size=100, sleep_seconds=0,
+        )
+    )
+    assert rows == [expected]
+    assert calls == [(3000, 0)]
 
 
 def test_normalize_phishing_filters_already_ingested_sources() -> None:
