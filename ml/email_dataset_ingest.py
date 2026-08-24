@@ -6,18 +6,23 @@ created later by the labeling pipeline.
 
 Sources:
 - Enron: ``corbt/enron-emails``
-- SpamAssassin: ``talby/spamassassin``
+- SpamAssassin: upstream public corpus at ``spamassassin.apache.org``
 - Additional independent corpora: ``puyang2025/seven-phishing-email-datasets``
   with Enron/Assassin rows excluded because those sources are already ingested.
   The retained sources are TREC-05, TREC-06, TREC-07, CEAS-08, and Ling.
 
-The Hugging Face datasets-server rows API is used so the repository does not
-need the ``datasets`` package merely to download raw email text.
+The Hugging Face datasets-server rows API is used for Enron and the phishing
+corpora. SpamAssassin is downloaded directly from its upstream public corpus so
+this workflow does not depend on Hugging Face's on-demand rows API for that
+source.
 """
 from __future__ import annotations
 
 import argparse
+import email
+import email.policy
 import json
+import tarfile
 import time
 import urllib.error
 import urllib.parse
@@ -29,6 +34,18 @@ from typing import Any, Iterable
 HF_ROWS_API = "https://datasets-server.huggingface.co/rows"
 PHISHING_DATASET = "puyang2025/seven-phishing-email-datasets"
 PHISHING_SOURCE_ALLOWLIST = {"TREC-05", "TREC-06", "TREC-07", "CEAS-08", "Ling"}
+SPAMASSASSIN_BASE_URL = "https://spamassassin.apache.org/old/publiccorpus/"
+SPAMASSASSIN_FILES = (
+    "20021010_easy_ham.tar.bz2",
+    "20021010_hard_ham.tar.bz2",
+    "20021010_spam.tar.bz2",
+    "20030228_easy_ham.tar.bz2",
+    "20030228_easy_ham_2.tar.bz2",
+    "20030228_hard_ham.tar.bz2",
+    "20030228_spam.tar.bz2",
+    "20030228_spam_2.tar.bz2",
+    "20050311_spam_2.tar.bz2",
+)
 
 
 @dataclass(frozen=True)
@@ -144,9 +161,87 @@ def normalize_phishing_row(row: dict[str, Any], source_example_id: str, split: s
     )
 
 
+def _message_text(raw: bytes) -> tuple[str, str]:
+    """Extract a subject and human-readable text from one raw email."""
+    message = email.message_from_bytes(raw, policy=email.policy.default)
+    subject = str(message.get("Subject", "")).strip()
+    plain_parts: list[str] = []
+    html_parts: list[str] = []
+    parts = message.walk() if message.is_multipart() else (message,)
+    for part in parts:
+        if part.get_content_disposition() == "attachment":
+            continue
+        if part.get_content_maintype() != "text":
+            continue
+        try:
+            content = part.get_content()
+        except (LookupError, UnicodeError, TypeError):
+            continue
+        if not isinstance(content, str) or not content.strip():
+            continue
+        if part.get_content_subtype() == "plain":
+            plain_parts.append(content.strip())
+        elif part.get_content_subtype() == "html":
+            html_parts.append(content.strip())
+    body_parts = plain_parts or html_parts
+    return subject, "\n\n".join(body_parts).strip()
+
+
+def _open_url_with_retries(url: str, *, max_retries: int = 5):
+    """Open a public URL with bounded retry handling for transient 429s."""
+    request = urllib.request.Request(url, headers={"User-Agent": "smart-inbox-ai-dataset-ingest/2.0"})
+    for attempt in range(max_retries + 1):
+        try:
+            return urllib.request.urlopen(request, timeout=120)  # nosec B310 - fixed HTTPS URLs
+        except urllib.error.HTTPError as error:
+            if error.code != 429 or attempt >= max_retries:
+                raise
+            time.sleep(_retry_delay(error, attempt))
+    raise RuntimeError("unreachable")
+
+
+def iter_spamassassin_direct(*, max_rows: int | None, sleep_seconds: float) -> Iterable[RawEmailRecord]:
+    """Yield SpamAssassin messages directly from the upstream public archives."""
+    emitted = 0
+    for filename in SPAMASSASSIN_FILES:
+        url = urllib.parse.urljoin(SPAMASSASSIN_BASE_URL, filename)
+        with _open_url_with_retries(url) as response:
+            with tarfile.open(fileobj=response, mode="r|bz2") as archive:
+                for member in archive:
+                    if not member.isfile():
+                        continue
+                    handle = archive.extractfile(member)
+                    if handle is None:
+                        continue
+                    subject, body = _message_text(handle.read())
+                    if not (subject or body):
+                        continue
+                    group = member.name.split("/", 1)[0]
+                    label = "ham" if "ham" in group else "spam"
+                    yield RawEmailRecord(
+                        id=f"spam_corpus_{member.name}",
+                        subject=subject,
+                        body=body,
+                        source="spam_corpus",
+                        source_example_id=member.name,
+                        source_split="train",
+                        source_dataset="talby/spamassassin",
+                        source_label=label,
+                    )
+                    emitted += 1
+                    if max_rows is not None and emitted >= max_rows:
+                        return
+        if sleep_seconds:
+            time.sleep(sleep_seconds)
+
+
 def iter_source(*, dataset: str, config: str, split: str, source: str,
                 max_rows: int | None, batch_size: int, sleep_seconds: float) -> Iterable[RawEmailRecord]:
     """Yield records from a configured source, filtering only where required."""
+    if source == "spam_corpus":
+        yield from iter_spamassassin_direct(max_rows=max_rows, sleep_seconds=sleep_seconds)
+        return
+
     offset = 0
     emitted = 0
     while max_rows is None or emitted < max_rows:
@@ -158,8 +253,6 @@ def iter_source(*, dataset: str, config: str, split: str, source: str,
             source_id = str(row.get("id", offset + index))
             if source == "enron":
                 record = normalize_enron(row, source_id, split)
-            elif source == "spam_corpus":
-                record = normalize_spamassassin(row, source_id, split)
             elif source == "phishing_corpus":
                 record = normalize_phishing_row(row, source_id, split)
                 if record is None:
