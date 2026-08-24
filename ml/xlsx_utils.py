@@ -53,9 +53,13 @@ TRUNCATION_MARKER: str = " [TRUNCATED]"
 #
 # Note: Python's `re` module works on Unicode code points, so surrogate range
 # \uD800–\uDFFF is implicitly excluded by the gap between \uD7FF and \uE000.
+#
+# IMPORTANT: Python's re module does NOT interpret \uXXXX or \UXXXXXXXX escapes
+# in raw strings (r"..."). We must use actual Unicode characters in the pattern.
+# We build the pattern using a regular string with Python-level Unicode escapes.
 
 _ILLEGAL_XML10_CHARS: re.Pattern[str] = re.compile(
-    r"[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD\U00010000-\U0010FFFF]",
+    "[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD\U00010000-\U0010FFFF]",
     re.UNICODE,
 )
 
