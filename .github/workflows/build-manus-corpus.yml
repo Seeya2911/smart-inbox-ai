@@ -53,10 +53,8 @@ jobs:
 
       - name: Download retained phishing corpora
         run: >-
-          python -m ml.email_dataset_ingest
-          --source phishing_corpus
+          python -m ml.phishing_parquet_ingest
           --max-rows "${{ inputs.phishing_rows }}"
-          --batch-size 100
           --output data/manus_build/phishing_corpus.jsonl
 
       - name: Export Manus workbook
