@@ -20,10 +20,21 @@ from typing import Any
 from openpyxl import Workbook
 
 
+# Excel/OpenXML worksheet cells reject most C0 control characters. Real email
+# corpora can contain these bytes, especially old Enron exports. Keep the
+# worksheet-safe whitespace controls (tab, LF, CR) and remove the rest.
+_ILLEGAL_XLSX_CHARS = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F]")
+
+
 def _norm(text: str) -> str:
     text = text.lower().replace("\r\n", "\n").replace("\r", "\n")
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def _sanitize_for_xlsx(text: str) -> str:
+    """Remove characters that openpyxl cannot write into worksheet cells."""
+    return _ILLEGAL_XLSX_CHARS.sub("", text)
 
 
 def _content_key(row: dict[str, Any]) -> str:
@@ -71,7 +82,13 @@ def export_xlsx(rows: list[dict[str, Any]], output: Path) -> None:
     sheet.title = "emails"
     sheet.append(["subject", "body", "source"])
     for row in rows:
-        sheet.append([row["subject"], row["body"], row["source"]])
+        sheet.append(
+            [
+                _sanitize_for_xlsx(row["subject"]),
+                _sanitize_for_xlsx(row["body"]),
+                _sanitize_for_xlsx(row["source"]),
+            ]
+        )
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = sheet.dimensions
     sheet.column_dimensions["A"].width = 45

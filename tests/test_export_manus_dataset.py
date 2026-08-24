@@ -37,3 +37,25 @@ def test_export_contains_only_labeling_columns(tmp_path: Path):
         ("A", "B", "enron"),
         ("C", "D", "spam_corpus"),
     ]
+
+
+def test_export_removes_illegal_control_characters(tmp_path: Path):
+    output = tmp_path / "manus.xlsx"
+    export_xlsx(
+        [
+            {
+                "subject": "Normal\nsubject",
+                "body": "Old Enron text\x01with\x0bcontrol\x1fchars\tkept",
+                "source": "enron",
+            }
+        ],
+        output,
+    )
+    workbook = load_workbook(output, read_only=True)
+    values = list(workbook.active.iter_rows(values_only=True))
+    assert values[0] == ("subject", "body", "source")
+    assert values[1] == (
+        "Normal\nsubject",
+        "Old Enron textwithcontrolchars\tkept",
+        "enron",
+    )
