@@ -2,7 +2,7 @@
 
 This stage intentionally does NOT assign Smart Inbox intent or priority labels.
 Source-native labels are preserved as metadata only. The production labels are
-created later by the weak-label/review pipeline.
+created later by the labeling pipeline.
 
 Sources:
 - Enron: ``corbt/enron-emails``
@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
@@ -26,7 +27,6 @@ from pathlib import Path
 from typing import Any, Iterable
 
 HF_ROWS_API = "https://datasets-server.huggingface.co/rows"
-
 PHISHING_DATASET = "puyang2025/seven-phishing-email-datasets"
 PHISHING_SOURCE_ALLOWLIST = {"TREC-05", "TREC-06", "TREC-07", "CEAS-08", "Ling"}
 
@@ -34,7 +34,6 @@ PHISHING_SOURCE_ALLOWLIST = {"TREC-05", "TREC-06", "TREC-07", "CEAS-08", "Ling"}
 @dataclass(frozen=True)
 class RawEmailRecord:
     """Unlabeled, provenance-preserving representation of one email."""
-
     id: str
     subject: str
     body: str
@@ -50,29 +49,44 @@ class RawEmailRecord:
         return asdict(self)
 
 
+def _retry_delay(error: urllib.error.HTTPError, attempt: int) -> float:
+    """Return a bounded delay, honoring Retry-After when supplied."""
+    retry_after = error.headers.get("Retry-After") if error.headers else None
+    if retry_after:
+        try:
+            return min(60.0, max(0.5, float(retry_after)))
+        except ValueError:
+            pass
+    return min(60.0, 1.0 * (2**attempt))
+
+
 def _request_rows(
     dataset: str,
     config: str,
     split: str,
     offset: int,
     length: int,
+    *,
+    max_retries: int = 5,
 ) -> list[dict[str, Any]]:
+    """Fetch one page from Hugging Face, retrying transient 429 responses."""
     params = urllib.parse.urlencode(
-        {
-            "dataset": dataset,
-            "config": config,
-            "split": split,
-            "offset": offset,
-            "length": length,
-        }
+        {"dataset": dataset, "config": config, "split": split, "offset": offset, "length": length}
     )
     request = urllib.request.Request(
         f"{HF_ROWS_API}?{params}",
         headers={"User-Agent": "smart-inbox-ai-dataset-ingest/2.0"},
     )
-    with urllib.request.urlopen(request, timeout=60) as response:  # nosec B310 - fixed HTTPS API
-        payload = json.load(response)
-    return [row.get("row", {}) for row in payload.get("rows", [])]
+    for attempt in range(max_retries + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:  # nosec B310 - fixed HTTPS API
+                payload = json.load(response)
+            return [row.get("row", {}) for row in payload.get("rows", [])]
+        except urllib.error.HTTPError as error:
+            if error.code != 429 or attempt >= max_retries:
+                raise
+            time.sleep(_retry_delay(error, attempt))
+    raise RuntimeError("unreachable")
 
 
 def _first_text(row: dict[str, Any], *keys: str) -> str:
@@ -93,48 +107,28 @@ def _subject_from_text(text: str) -> str:
 
 
 def _record_from_common(
-    row: dict[str, Any],
-    *,
-    source: str,
-    source_example_id: str,
-    split: str,
-    source_dataset: str,
-    source_label: str = "",
+    row: dict[str, Any], *, source: str, source_example_id: str, split: str,
+    source_dataset: str, source_label: str = "",
 ) -> RawEmailRecord:
     text = _first_text(row, "text", "body", "email")
     subject = _first_text(row, "subject") or _subject_from_text(text)
     return RawEmailRecord(
-        id=f"{source}_{source_example_id}",
-        subject=subject,
-        body=text,
-        source=source,
-        source_example_id=source_example_id,
-        source_split=split,
-        source_dataset=source_dataset,
-        source_label=source_label,
+        id=f"{source}_{source_example_id}", subject=subject, body=text, source=source,
+        source_example_id=source_example_id, source_split=split,
+        source_dataset=source_dataset, source_label=source_label,
     )
 
 
 def normalize_enron(row: dict[str, Any], source_example_id: str, split: str) -> RawEmailRecord:
-    return _record_from_common(
-        row,
-        source="enron",
-        source_example_id=source_example_id,
-        split=split,
-        source_dataset="corbt/enron-emails",
-    )
+    return _record_from_common(row, source="enron", source_example_id=source_example_id,
+                               split=split, source_dataset="corbt/enron-emails")
 
 
 def normalize_spamassassin(row: dict[str, Any], source_example_id: str, split: str) -> RawEmailRecord:
     source_label = row.get("label")
-    return _record_from_common(
-        row,
-        source="spam_corpus",
-        source_example_id=source_example_id,
-        split=split,
-        source_dataset="talby/spamassassin",
-        source_label="" if source_label is None else str(source_label),
-    )
+    return _record_from_common(row, source="spam_corpus", source_example_id=source_example_id,
+                               split=split, source_dataset="talby/spamassassin",
+                               source_label="" if source_label is None else str(source_label))
 
 
 def normalize_phishing_row(row: dict[str, Any], source_example_id: str, split: str) -> RawEmailRecord | None:
@@ -144,36 +138,22 @@ def normalize_phishing_row(row: dict[str, Any], source_example_id: str, split: s
         return None
     source_label = row.get("label")
     return _record_from_common(
-        row,
-        source="phishing_corpus",
-        source_example_id=f"{dataset_name}:{source_example_id}",
-        split=split,
-        source_dataset=dataset_name,
+        row, source="phishing_corpus", source_example_id=f"{dataset_name}:{source_example_id}",
+        split=split, source_dataset=dataset_name,
         source_label="" if source_label is None else str(source_label),
     )
 
 
-def iter_source(
-    *,
-    dataset: str,
-    config: str,
-    split: str,
-    source: str,
-    max_rows: int | None,
-    batch_size: int,
-    sleep_seconds: float,
-) -> Iterable[RawEmailRecord]:
+def iter_source(*, dataset: str, config: str, split: str, source: str,
+                max_rows: int | None, batch_size: int, sleep_seconds: float) -> Iterable[RawEmailRecord]:
     """Yield records from a configured source, filtering only where required."""
     offset = 0
     emitted = 0
-    requested = 0
-
     while max_rows is None or emitted < max_rows:
         length = batch_size if max_rows is None else min(batch_size, max_rows - emitted)
         rows = _request_rows(dataset, config, split, offset, length)
         if not rows:
             break
-
         for index, row in enumerate(rows):
             source_id = str(row.get("id", offset + index))
             if source == "enron":
@@ -186,15 +166,12 @@ def iter_source(
                     continue
             else:
                 raise ValueError(f"Unsupported source: {source}")
-
-            requested += 1
             if not (record.subject.strip() or record.body.strip()):
                 continue
             yield record
             emitted += 1
             if max_rows is not None and emitted >= max_rows:
                 break
-
         offset += len(rows)
         if len(rows) < length:
             break
@@ -238,17 +215,10 @@ def main() -> None:
         raise SystemExit("--batch-size must be positive")
     if args.max_rows is not None and args.max_rows < 1:
         raise SystemExit("--max-rows must be positive when supplied")
-
     dataset, config, split = source_config(args.source)
-    records = iter_source(
-        dataset=dataset,
-        config=config,
-        split=split,
-        source=args.source,
-        max_rows=args.max_rows,
-        batch_size=args.batch_size,
-        sleep_seconds=args.sleep_seconds,
-    )
+    records = iter_source(dataset=dataset, config=config, split=split, source=args.source,
+                          max_rows=args.max_rows, batch_size=args.batch_size,
+                          sleep_seconds=args.sleep_seconds)
     count = write_jsonl(records, args.output)
     print(json.dumps({"output": str(args.output), "source": args.source, "rows_written": count}, indent=2))
 
