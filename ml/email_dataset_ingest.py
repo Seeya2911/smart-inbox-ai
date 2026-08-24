@@ -11,16 +11,17 @@ Sources:
   with Enron/Assassin rows excluded because those sources are already ingested.
   The retained sources are TREC-05, TREC-06, TREC-07, CEAS-08, and Ling.
 
-The Hugging Face datasets-server rows API is used for Enron and the phishing
-corpora. SpamAssassin is downloaded directly from its upstream public corpus so
-this workflow does not depend on Hugging Face's on-demand rows API for that
-source.
+The Hugging Face datasets-server rows API is used only for Enron. SpamAssassin
+and the retained phishing corpora are downloaded through their public dataset
+files instead of the on-demand rows API, avoiding rate-limit failures.
 """
 from __future__ import annotations
 
 import argparse
+import csv
 import email
 import email.policy
+import io
 import json
 import tarfile
 import time
@@ -32,8 +33,9 @@ from pathlib import Path
 from typing import Any, Iterable
 
 HF_ROWS_API = "https://datasets-server.huggingface.co/rows"
+HF_DATASET_RESOLVE = "https://huggingface.co/datasets/puyang2025/seven-phishing-email-datasets/resolve/main/"
 PHISHING_DATASET = "puyang2025/seven-phishing-email-datasets"
-PHISHING_SOURCE_ALLOWLIST = {"TREC-05", "TREC-06", "TREC-07", "CEAS-08", "Ling"}
+PHISHING_SOURCE_ALLOWLIST = ("TREC-05", "TREC-06", "TREC-07", "CEAS-08", "Ling")
 SPAMASSASSIN_BASE_URL = "https://spamassassin.apache.org/old/publiccorpus/"
 SPAMASSASSIN_FILES = (
     "20021010_easy_ham.tar.bz2",
@@ -219,18 +221,57 @@ def iter_spamassassin_direct(*, max_rows: int | None, sleep_seconds: float) -> I
                     group = member.name.split("/", 1)[0]
                     label = "ham" if "ham" in group else "spam"
                     yield RawEmailRecord(
-                        id=f"spam_corpus_{member.name}",
-                        subject=subject,
-                        body=body,
-                        source="spam_corpus",
-                        source_example_id=member.name,
-                        source_split="train",
-                        source_dataset="talby/spamassassin",
-                        source_label=label,
+                        id=f"spam_corpus_{member.name}", subject=subject, body=body,
+                        source="spam_corpus", source_example_id=member.name, source_split="train",
+                        source_dataset="talby/spamassassin", source_label=label,
                     )
                     emitted += 1
                     if max_rows is not None and emitted >= max_rows:
                         return
+        if sleep_seconds:
+            time.sleep(sleep_seconds)
+
+
+def _phishing_file_url(source_dataset: str) -> str:
+    filename = urllib.parse.quote(f"{source_dataset}.csv")
+    return urllib.parse.urljoin(HF_DATASET_RESOLVE, filename) + "?download=true"
+
+
+def _iter_phishing_csv(source_dataset: str, quota: int) -> Iterable[RawEmailRecord]:
+    """Stream one source CSV directly from the public dataset file."""
+    with _open_url_with_retries(_phishing_file_url(source_dataset)) as response:
+        text_stream = io.TextIOWrapper(response, encoding="utf-8-sig", errors="replace", newline="")
+        try:
+            reader = csv.DictReader(text_stream)
+            emitted = 0
+            for index, row in enumerate(reader):
+                record = normalize_phishing_row(
+                    {**row, "dataset_name": source_dataset}, str(index), "train"
+                )
+                if record is None or not (record.subject.strip() or record.body.strip()):
+                    continue
+                yield record
+                emitted += 1
+                if emitted >= quota:
+                    break
+        finally:
+            text_stream.detach()
+
+
+def iter_phishing_direct(*, max_rows: int | None, sleep_seconds: float) -> Iterable[RawEmailRecord]:
+    """Yield a balanced sample from retained phishing source CSVs."""
+    if max_rows is None:
+        quota = None
+    else:
+        quota = max(1, (max_rows + len(PHISHING_SOURCE_ALLOWLIST) - 1) // len(PHISHING_SOURCE_ALLOWLIST))
+    emitted = 0
+    for source_dataset in PHISHING_SOURCE_ALLOWLIST:
+        source_quota = quota if quota is not None else 10**9
+        for record in _iter_phishing_csv(source_dataset, source_quota):
+            yield record
+            emitted += 1
+            if max_rows is not None and emitted >= max_rows:
+                return
         if sleep_seconds:
             time.sleep(sleep_seconds)
 
@@ -240,6 +281,9 @@ def iter_source(*, dataset: str, config: str, split: str, source: str,
     """Yield records from a configured source, filtering only where required."""
     if source == "spam_corpus":
         yield from iter_spamassassin_direct(max_rows=max_rows, sleep_seconds=sleep_seconds)
+        return
+    if source == "phishing_corpus":
+        yield from iter_phishing_direct(max_rows=max_rows, sleep_seconds=sleep_seconds)
         return
 
     offset = 0
@@ -253,10 +297,6 @@ def iter_source(*, dataset: str, config: str, split: str, source: str,
             source_id = str(row.get("id", offset + index))
             if source == "enron":
                 record = normalize_enron(row, source_id, split)
-            elif source == "phishing_corpus":
-                record = normalize_phishing_row(row, source_id, split)
-                if record is None:
-                    continue
             else:
                 raise ValueError(f"Unsupported source: {source}")
             if not (record.subject.strip() or record.body.strip()):
