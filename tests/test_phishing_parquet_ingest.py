@@ -10,10 +10,10 @@ def test_build_records_filters_sources_and_balances_sample(tmp_path) -> None:
     path = tmp_path / "train.parquet"
     table = pa.table(
         {
-            "text": ["a", "b", "c", "d", "e", "f", "g"],
-            "subject": ["A", "B", "C", "D", "E", "F", "G"],
-            "label": [0, 1, 0, 1, 0, 1, 1],
-            "dataset_name": ["TREC-05", "TREC-05", "TREC-06", "CEAS-08", "Ling", "Enron", "Assassin"],
+            "text": ["a", "b", "c", "d", "e", "f", "g", "h"],
+            "subject": ["A", "B", "C", "D", "E", "F", "G", "H"],
+            "label": [0, 1, 0, 1, 0, 1, 1, 0],
+            "dataset_name": ["TREC-05", "TREC-05", "TREC-06", "CEAS-08", "Ling", "Enron", "Assassin", "TREC-06"],
         }
     )
     pq.write_table(table, path)
