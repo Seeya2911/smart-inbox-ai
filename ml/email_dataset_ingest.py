@@ -11,9 +11,8 @@ Sources:
   with Enron/Assassin rows excluded because those sources are already ingested.
   The retained sources are TREC-05, TREC-06, TREC-07, CEAS-08, and Ling.
 
-The Hugging Face datasets-server rows API is used only for Enron. SpamAssassin
-and the retained phishing corpora are downloaded through their public dataset
-files instead of the on-demand rows API, avoiding rate-limit failures.
+All corpus sources are downloaded through public dataset files rather than the
+Hugging Face datasets-server rows API, avoiding rate-limit failures.
 """
 from __future__ import annotations
 
@@ -24,6 +23,7 @@ import email.policy
 import io
 import json
 import tarfile
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -34,6 +34,12 @@ from typing import Any, Iterable
 
 HF_ROWS_API = "https://datasets-server.huggingface.co/rows"
 HF_DATASET_RESOLVE = "https://huggingface.co/datasets/puyang2025/seven-phishing-email-datasets/resolve/main/"
+ENRON_DATASET_RESOLVE = "https://huggingface.co/datasets/corbt/enron-emails/resolve/main/data/"
+ENRON_PARQUET_FILES = (
+    "train-00000-of-00003.parquet",
+    "train-00001-of-00003.parquet",
+    "train-00002-of-00003.parquet",
+)
 PHISHING_DATASET = "puyang2025/seven-phishing-email-datasets"
 PHISHING_SOURCE_ALLOWLIST = ("TREC-05", "TREC-06", "TREC-07", "CEAS-08", "Ling")
 SPAMASSASSIN_BASE_URL = "https://spamassassin.apache.org/old/publiccorpus/"
@@ -88,13 +94,13 @@ def _request_rows(
     *,
     max_retries: int = 5,
 ) -> list[dict[str, Any]]:
-    """Fetch one page from Hugging Face, retrying transient 429 responses."""
+    """Fetch one page from Hugging Face's rows API for compatibility/tests."""
     params = urllib.parse.urlencode(
         {"dataset": dataset, "config": config, "split": split, "offset": offset, "length": length}
     )
     request = urllib.request.Request(
         f"{HF_ROWS_API}?{params}",
-        headers={"User-Agent": "smart-inbox-ai-dataset-ingest/2.0"},
+        headers={"User-Agent": "smart-inbox-ai-dataset-ingest/3.0"},
     )
     for attempt in range(max_retries + 1):
         try:
@@ -190,16 +196,73 @@ def _message_text(raw: bytes) -> tuple[str, str]:
 
 
 def _open_url_with_retries(url: str, *, max_retries: int = 5):
-    """Open a public URL with bounded retry handling for transient 429s."""
-    request = urllib.request.Request(url, headers={"User-Agent": "smart-inbox-ai-dataset-ingest/2.0"})
+    """Open a public URL with bounded retry handling for transient HTTP failures."""
+    request = urllib.request.Request(url, headers={"User-Agent": "smart-inbox-ai-dataset-ingest/3.0"})
     for attempt in range(max_retries + 1):
         try:
             return urllib.request.urlopen(request, timeout=120)  # nosec B310 - fixed HTTPS URLs
         except urllib.error.HTTPError as error:
-            if error.code != 429 or attempt >= max_retries:
+            if error.code not in {429, 502, 503, 504} or attempt >= max_retries:
                 raise
             time.sleep(_retry_delay(error, attempt))
     raise RuntimeError("unreachable")
+
+
+def _download_to_temp(url: str, suffix: str) -> Path:
+    """Download one public dataset file to a temporary local path."""
+    response = _open_url_with_retries(url)
+    handle = tempfile.NamedTemporaryFile(prefix="smart_inbox_dataset_", suffix=suffix, delete=False)
+    path = Path(handle.name)
+    try:
+        with response:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                handle.write(chunk)
+    finally:
+        handle.close()
+    return path
+
+
+def iter_enron_direct(*, max_rows: int | None, sleep_seconds: float) -> Iterable[RawEmailRecord]:
+    """Yield Enron rows from the public Parquet files without the rows API."""
+    if max_rows is None:
+        quotas = [None] * len(ENRON_PARQUET_FILES)
+    else:
+        base, remainder = divmod(max_rows, len(ENRON_PARQUET_FILES))
+        quotas = [base + (index < remainder) for index in range(len(ENRON_PARQUET_FILES))]
+
+    emitted = 0
+    for filename, quota in zip(ENRON_PARQUET_FILES, quotas):
+        if quota == 0:
+            continue
+        url = urllib.parse.urljoin(ENRON_DATASET_RESOLVE, filename) + "?download=true"
+        path = _download_to_temp(url, ".parquet")
+        try:
+            import pyarrow.parquet as pq
+
+            parquet = pq.ParquetFile(path)
+            remaining = quota
+            for row_group in range(parquet.num_row_groups):
+                if remaining is not None and remaining <= 0:
+                    break
+                table = parquet.read_row_group(row_group, columns=["message_id", "subject", "body"])
+                for row in table.to_pylist():
+                    source_id = str(row.get("message_id") or f"{filename}:{emitted}")
+                    record = normalize_enron(row, source_id, "train")
+                    if not (record.subject.strip() or record.body.strip()):
+                        continue
+                    yield record
+                    emitted += 1
+                    if remaining is not None:
+                        remaining -= 1
+                    if max_rows is not None and emitted >= max_rows:
+                        return
+        finally:
+            path.unlink(missing_ok=True)
+        if sleep_seconds:
+            time.sleep(sleep_seconds)
 
 
 def iter_spamassassin_direct(*, max_rows: int | None, sleep_seconds: float) -> Iterable[RawEmailRecord]:
@@ -279,37 +342,16 @@ def iter_phishing_direct(*, max_rows: int | None, sleep_seconds: float) -> Itera
 def iter_source(*, dataset: str, config: str, split: str, source: str,
                 max_rows: int | None, batch_size: int, sleep_seconds: float) -> Iterable[RawEmailRecord]:
     """Yield records from a configured source, filtering only where required."""
+    if source == "enron":
+        yield from iter_enron_direct(max_rows=max_rows, sleep_seconds=sleep_seconds)
+        return
     if source == "spam_corpus":
         yield from iter_spamassassin_direct(max_rows=max_rows, sleep_seconds=sleep_seconds)
         return
     if source == "phishing_corpus":
         yield from iter_phishing_direct(max_rows=max_rows, sleep_seconds=sleep_seconds)
         return
-
-    offset = 0
-    emitted = 0
-    while max_rows is None or emitted < max_rows:
-        length = batch_size if max_rows is None else min(batch_size, max_rows - emitted)
-        rows = _request_rows(dataset, config, split, offset, length)
-        if not rows:
-            break
-        for index, row in enumerate(rows):
-            source_id = str(row.get("id", offset + index))
-            if source == "enron":
-                record = normalize_enron(row, source_id, split)
-            else:
-                raise ValueError(f"Unsupported source: {source}")
-            if not (record.subject.strip() or record.body.strip()):
-                continue
-            yield record
-            emitted += 1
-            if max_rows is not None and emitted >= max_rows:
-                break
-        offset += len(rows)
-        if len(rows) < length:
-            break
-        if sleep_seconds:
-            time.sleep(sleep_seconds)
+    raise ValueError(f"Unsupported source: {source}")
 
 
 def write_jsonl(records: Iterable[RawEmailRecord], output: Path) -> int:
