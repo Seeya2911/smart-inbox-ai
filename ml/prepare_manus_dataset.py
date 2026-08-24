@@ -5,6 +5,13 @@ labeling workflow: subject, body, and source. Smart Inbox intent/priority are
 NOT assigned here. A deterministic manifest preserves the source IDs so the
 labeled workbook can be joined back to the canonical corpus after Manus
 returns it.
+
+Sanitization
+------------
+All cell values are run through :func:`ml.xlsx_utils.prepare_cell` which
+removes every character that is illegal in XML 1.0 and truncates at Excel's
+32 767-character per-cell limit.  This prevents Microsoft Excel from reporting
+a corrupted workbook when the XLSX is downloaded and opened.
 """
 from __future__ import annotations
 
@@ -17,6 +24,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from openpyxl import Workbook
+
+from ml.xlsx_utils import prepare_cell
 
 
 SIGNATURE_RE = re.compile(
@@ -89,6 +98,14 @@ def prepare_records(paths: Iterable[Path]) -> tuple[list[dict[str, Any]], dict[s
 
 
 def write_batches(records: list[dict[str, Any]], output_dir: Path, batch_size: int) -> list[dict[str, Any]]:
+    """Write *records* to sequentially numbered XLSX batch files.
+
+    Every cell value is sanitized (illegal XML 1.0 characters removed) and
+    truncated to Excel's 32 767-character per-cell limit before writing.
+
+    Returns:
+        A manifest list — one entry per data row across all batches.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest: list[dict[str, Any]] = []
     for start in range(0, len(records), batch_size):
@@ -101,7 +118,10 @@ def write_batches(records: list[dict[str, Any]], output_dir: Path, batch_size: i
         sheet.title = "emails"
         sheet.append(["subject", "body", "source"])
         for record in batch:
-            sheet.append([record["subject"], record["body"], record["source"]])
+            subject_cell, _ = prepare_cell(record["subject"])
+            body_cell, _ = prepare_cell(record["body"])
+            source_cell, _ = prepare_cell(record["source"])
+            sheet.append([subject_cell, body_cell, source_cell])
         sheet.freeze_panes = "A2"
         sheet.auto_filter.ref = sheet.dimensions
         sheet.column_dimensions["A"].width = 42

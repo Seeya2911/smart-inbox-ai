@@ -58,6 +58,9 @@ jobs:
           --output data/manus_build/phishing_corpus.jsonl
 
       - name: Export Manus workbook
+        # export_manus_dataset.main() calls validate_workbook() internally and
+        # exits non-zero if the generated XLSX is corrupt. The artifact is
+        # therefore never uploaded when the workbook fails self-validation.
         run: >-
           python -m ml.export_manus_dataset
           data/manus_build/enron.jsonl
@@ -66,22 +69,65 @@ jobs:
           --output data/manus_build/smart_inbox_manus_corpus.xlsx
           --manifest data/manus_build/smart_inbox_manus_corpus.manifest.json
 
-      - name: Validate workbook schema
+      - name: Validate workbook schema and integrity
+        # This step performs a deep, independent validation of the generated
+        # workbook using ml.xlsx_utils.validate_workbook().  It is intentionally
+        # separate from the self-validation inside the exporter so that any future
+        # change to the exporter cannot silently bypass the check.
         run: |
           python - <<'PY'
           import json
+          import sys
+          import zipfile
           from pathlib import Path
-          from openpyxl import load_workbook
+
+          from ml.xlsx_utils import validate_workbook, EXCEL_MAX_CELL_CHARS
 
           root = Path("data/manus_build")
-          workbook = load_workbook(root / "smart_inbox_manus_corpus.xlsx", read_only=True)
-          sheet = workbook["emails"]
-          headers = [cell.value for cell in next(sheet.iter_rows(max_row=1))]
-          assert headers == ["subject", "body", "source"], headers
-          assert sheet.max_row > 1
-          manifest = json.loads((root / "smart_inbox_manus_corpus.manifest.json").read_text(encoding="utf-8"))
-          assert manifest["output_rows"] == sheet.max_row - 1
-          print(json.dumps(manifest, indent=2))
+          xlsx_path = root / "smart_inbox_manus_corpus.xlsx"
+          manifest_path = root / "smart_inbox_manus_corpus.manifest.json"
+
+          # 1. Independent validate_workbook() check
+          result = validate_workbook(xlsx_path)
+          if not result["valid"]:
+              print("XLSX VALIDATION FAILED:", file=sys.stderr)
+              for err in result["errors"]:
+                  print(f"  ERROR: {err}", file=sys.stderr)
+              sys.exit(1)
+
+          # 2. Cross-check manifest row count
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          expected_rows = manifest["output_rows"]
+          actual_rows = result["row_count"]
+          if expected_rows != actual_rows:
+              print(
+                  f"Row count mismatch: manifest says {expected_rows}, "
+                  f"workbook has {actual_rows}",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          # 3. Source values sanity check
+          known_sources = {"enron", "spam_corpus", "phishing_corpus"}
+          unknown = {s for s in result["source_counts"] if s not in known_sources}
+          if unknown:
+              print(f"Unknown source values found: {unknown}", file=sys.stderr)
+              sys.exit(1)
+
+          # 4. Every expected source must have at least one row
+          for expected_source in known_sources:
+              if expected_source not in result["source_counts"]:
+                  print(f"Missing expected source: {expected_source}", file=sys.stderr)
+                  sys.exit(1)
+
+          # 5. Report
+          print("Workbook validation PASSED")
+          print(json.dumps({
+              "row_count": result["row_count"],
+              "source_counts": result["source_counts"],
+              "truncated_cells": result["truncated_cells"],
+              "excel_max_cell_chars": EXCEL_MAX_CELL_CHARS,
+          }, indent=2))
           PY
 
       - name: Upload Manus corpus
