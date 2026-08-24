@@ -96,9 +96,10 @@ class TestSanitizeForXlsx:
         """Line Feed (\\x0A) must survive — Excel supports multi-line cells."""
         assert sanitize_for_xlsx("line1\nline2") == "line1\nline2"
 
-    def test_cr_preserved(self):
-        """Carriage Return (\\x0D) is legal in XML 1.0."""
-        assert sanitize_for_xlsx("a\rb") == "a\rb"
+    def test_cr_normalized_to_lf(self):
+        """Carriage Return (\\x0D) is normalized to standard Line Feed (\\n)."""
+        assert sanitize_for_xlsx("a\rb") == "a\nb"
+        assert sanitize_for_xlsx("a\r\nb") == "a\nb"
 
     def test_normal_ascii_preserved(self):
         text = "Hello, World! 123 #@$%^&*()"
@@ -408,6 +409,37 @@ class TestExportXlsx:
         assert result["row_count"] == 2
         assert result["source_counts"].get("enron") == 1
         assert result["source_counts"].get("spam_corpus") == 1
+
+    def test_formula_prefixed_strings_saved_as_text_not_formula(self, tmp_path: Path):
+        """Strings starting with '=', '===', or MIME headers must not create <f> tags."""
+        output = tmp_path / "formula_test.xlsx"
+        export_xlsx(
+            [
+                {
+                    "subject": "=?UTF-8?B?4pyoIEhlbGxv?=",
+                    "body": "================== Original Message ==================\n=20\n=3D",
+                    "source": "enron",
+                },
+                {
+                    "subject": "=HYPERLINK(\"http://phish.com\")",
+                    "body": "+1-800-555-0199 / -50% discount / @everyone",
+                    "source": "phishing_corpus",
+                },
+            ],
+            output,
+        )
+        result = validate_workbook(output)
+        assert result["valid"], f"Validation failed on formula-prefixed text: {result['errors']}"
+        
+        # Verify no <f> formula tags exist in the sheet XML
+        with zipfile.ZipFile(output, "r") as zf:
+            sheet_xml = zf.read("xl/worksheets/sheet1.xml").decode("utf-8")
+            assert "<f>" not in sheet_xml and "<f " not in sheet_xml, "Formula tags generated in sheet XML!"
+        
+        # Verify values read back properly
+        values = _xlsx_values(output)
+        assert values[1][0] == "=?UTF-8?B?4pyoIEhlbGxv?="
+        assert "Original Message" in values[1][1]
 
 
 # ---------------------------------------------------------------------------

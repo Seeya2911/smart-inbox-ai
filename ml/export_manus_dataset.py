@@ -103,7 +103,9 @@ def export_xlsx(rows: list[dict[str, Any]], output: Path) -> dict[str, int]:
     """Write *rows* to a Manus-ready XLSX at *output*.
 
     Every cell value is sanitized (illegal XML 1.0 characters removed) and
-    truncated to Excel's 32 767-character per-cell limit.
+    truncated to Excel's 32 767-character per-cell limit. All cells are
+    explicitly stored with data_type="s" (string) so that email text starting
+    with "=" or formatting dividers is never parsed as a formula by Excel.
 
     Returns:
         ``{"truncated_rows": n}`` — the number of rows where truncation occurred.
@@ -112,19 +114,28 @@ def export_xlsx(rows: list[dict[str, Any]], output: Path) -> dict[str, int]:
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "emails"
-    sheet.append(["subject", "body", "source"])
+
+    # Header row
+    for col_idx, col_name in enumerate(["subject", "body", "source"], start=1):
+        cell = sheet.cell(row=1, column=col_idx)
+        cell.value = col_name
+        cell.data_type = "s"
 
     truncated_rows = 0
-    for row in rows:
+    for row_idx, row in enumerate(rows, start=2):
         subject_cell, sub_trunc = prepare_cell(row["subject"])
         body_cell, body_trunc = prepare_cell(row["body"])
         source_cell, _src_trunc = prepare_cell(row["source"])
         if sub_trunc or body_trunc:
             truncated_rows += 1
-        sheet.append([subject_cell, body_cell, source_cell])
+
+        for col_idx, val in enumerate([subject_cell, body_cell, source_cell], start=1):
+            cell = sheet.cell(row=row_idx, column=col_idx)
+            cell.value = val
+            cell.data_type = "s"  # strictly prevent formula interpretation
 
     sheet.freeze_panes = "A2"
-    sheet.auto_filter.ref = sheet.dimensions
+    sheet.auto_filter.ref = f"A1:C{len(rows) + 1}"
     sheet.column_dimensions["A"].width = 45
     sheet.column_dimensions["B"].width = 100
     sheet.column_dimensions["C"].width = 20
