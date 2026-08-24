@@ -1,0 +1,95 @@
+name: Build Manus corpus artifact
+
+on:
+  workflow_dispatch:
+    inputs:
+      enron_rows:
+        description: "Enron rows"
+        required: true
+        default: "4000"
+      spam_rows:
+        description: "SpamAssassin rows"
+        required: true
+        default: "3000"
+      phishing_rows:
+        description: "Retained phishing-corpus rows"
+        required: true
+        default: "3000"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install exporter dependency
+        run: python -m pip install --disable-pip-version-check openpyxl
+
+      - name: Create workspace
+        run: mkdir -p data/manus_build
+
+      - name: Download Enron
+        run: >-
+          python -m ml.email_dataset_ingest
+          --source enron
+          --max-rows "${{ inputs.enron_rows }}"
+          --batch-size 100
+          --output data/manus_build/enron.jsonl
+
+      - name: Download SpamAssassin
+        run: >-
+          python -m ml.email_dataset_ingest
+          --source spam_corpus
+          --max-rows "${{ inputs.spam_rows }}"
+          --batch-size 100
+          --output data/manus_build/spam_corpus.jsonl
+
+      - name: Download retained phishing corpora
+        run: >-
+          python -m ml.email_dataset_ingest
+          --source phishing_corpus
+          --max-rows "${{ inputs.phishing_rows }}"
+          --batch-size 100
+          --output data/manus_build/phishing_corpus.jsonl
+
+      - name: Export Manus workbook
+        run: >-
+          python -m ml.export_manus_dataset
+          data/manus_build/enron.jsonl
+          data/manus_build/spam_corpus.jsonl
+          data/manus_build/phishing_corpus.jsonl
+          --output data/manus_build/smart_inbox_manus_corpus.xlsx
+          --manifest data/manus_build/smart_inbox_manus_corpus.manifest.json
+
+      - name: Validate workbook schema
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from openpyxl import load_workbook
+
+          root = Path("data/manus_build")
+          workbook = load_workbook(root / "smart_inbox_manus_corpus.xlsx", read_only=True)
+          sheet = workbook["emails"]
+          headers = [cell.value for cell in next(sheet.iter_rows(max_row=1))]
+          assert headers == ["subject", "body", "source"], headers
+          assert sheet.max_row > 1
+          manifest = json.loads((root / "smart_inbox_manus_corpus.manifest.json").read_text(encoding="utf-8"))
+          assert manifest["output_rows"] == sheet.max_row - 1
+          print(json.dumps(manifest, indent=2))
+          PY
+
+      - name: Upload Manus corpus
+        uses: actions/upload-artifact@v4
+        with:
+          name: smart-inbox-manus-corpus
+          path: data/manus_build/smart_inbox_manus_corpus.*
+          if-no-files-found: error
+          retention-days: 14
