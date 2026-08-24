@@ -15,8 +15,8 @@ class FakeLLM:
 def make_example():
     return CanonicalEmailExample(
         id="enron_001",
-        subject="Account security notice",
-        body="We detected suspicious activity on your account.",
+        subject="Team lunch next week",
+        body="Let me know which day works best for lunch.",
         intent="information",
         priority="low",
         source="enron",
@@ -42,9 +42,10 @@ def test_llm_is_authoritative_when_rule_disagrees():
     assert labeled.intent == "security"
     assert labeled.priority == "high"
     assert labeled.label_source == "llm"
-    assert labeled.rule_intent == "security"
-    assert labeled.llm_rule_agreement is True
+    assert labeled.rule_intent != "security"
+    assert labeled.llm_rule_agreement is False
     assert labeled.label_confidence == pytest.approx(0.91)
+    assert "LLM intent 'security' was selected over rule intent" in labeled.label_resolution_reason
 
 
 def test_llm_label_wins_and_disagreement_is_recorded():
