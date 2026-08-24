@@ -65,6 +65,51 @@ def test_iter_source_uses_direct_spamassassin_path(monkeypatch) -> None:
     assert calls == [(3000, 0)]
 
 
+def test_iter_source_uses_direct_phishing_path(monkeypatch) -> None:
+    expected = ingest.RawEmailRecord(
+        "phishing_corpus_TREC-05:1", "Notice", "Body", "phishing_corpus", "TREC-05:1", "train", "TREC-05", "1"
+    )
+
+    def fake_direct(*, max_rows: int | None, sleep_seconds: float):
+        assert max_rows == 3000
+        assert sleep_seconds == 0
+        yield expected
+
+    def fail_rows(*args, **kwargs):
+        raise AssertionError("Phishing corpus must not use the Hugging Face rows API")
+
+    monkeypatch.setattr(ingest, "iter_phishing_direct", fake_direct)
+    monkeypatch.setattr(ingest, "_request_rows", fail_rows)
+    rows = list(
+        ingest.iter_source(
+            dataset=ingest.PHISHING_DATASET, config="default", split="train", source="phishing_corpus",
+            max_rows=3000, batch_size=100, sleep_seconds=0,
+        )
+    )
+    assert rows == [expected]
+
+
+def test_iter_phishing_csv_normalizes_source_and_native_label(monkeypatch) -> None:
+    csv_bytes = (
+        "subject,text,label,dataset_name\n"
+        'Security notice,"Please review your account",1,TREC-05\n'
+        'Routine note,"See you tomorrow",0,TREC-05\n'
+    ).encode()
+
+    class Response(io.BytesIO):
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            self.close()
+            return False
+
+    monkeypatch.setattr(ingest, "_open_url_with_retries", lambda url: Response(csv_bytes))
+    rows = list(ingest._iter_phishing_csv("TREC-05", 2))
+    assert [row.subject for row in rows] == ["Security notice", "Routine note"]
+    assert [row.source_dataset for row in rows] == ["TREC-05", "TREC-05"]
+    assert [row.source_label for row in rows] == ["1", "0"]
+
+
 def test_normalize_phishing_filters_already_ingested_sources() -> None:
     duplicate = ingest.normalize_phishing_row(
         {"dataset_name": "Enron", "text": "Subject: Existing"}, "1", "train"
