@@ -57,9 +57,16 @@ TRUNCATION_MARKER: str = " [TRUNCATED]"
 # IMPORTANT: Python's re module does NOT interpret \uXXXX or \UXXXXXXXX escapes
 # in raw strings (r"..."). We must use actual Unicode characters in the pattern.
 # We build the pattern using a regular string with Python-level Unicode escapes.
+#
+# We deliberately SPLIT the original XML 1.0 range [\x20-\uD7FF] into two:
+#   [\x20-\x7E]   — printable ASCII (space through tilde)
+#   [\xA0-\uD7FF] — Latin-1 supplement and higher BMP characters
+# This gap (\x7F and \x80-\x9F) excludes:
+#   \x7F      — DEL: technically legal in XML 1.0 but problematic in Excel
+#   \x80-\x9F — C1 controls: legal Latin-1 bytes but illegal in XML 1.0
 
 _ILLEGAL_XML10_CHARS: re.Pattern[str] = re.compile(
-    "[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD\U00010000-\U0010FFFF]",
+    "[^\x09\x0A\x0D\x20-\x7E\xA0-\uD7FF\uE000-\uFFFD\U00010000-\U0010FFFF]",
     re.UNICODE,
 )
 
@@ -118,6 +125,10 @@ def truncate_for_xlsx(
     if len(text) <= max_chars:
         return text, False
     # Reserve space for the marker inside the limit.
+    # Guard: if max_chars is shorter than the marker itself, plain-truncate
+    # without appending the marker (the marker would overflow the limit).
+    if max_chars <= len(marker):
+        return text[:max_chars], True
     cut = max_chars - len(marker)
     return text[:cut] + marker, True
 

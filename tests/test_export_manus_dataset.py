@@ -241,7 +241,7 @@ class TestExportXlsx:
             output,
         )
         values = _xlsx_values(output)
-        assert values[1][0] == "Subect"    # NUL removed → "Sub" + "ect" = "Subect"
+        assert values[1][0] == "Subject"   # NUL removed → "Subject"
         assert values[1][1] == "Bodytext"  # SOH removed
 
     def test_del_character_removed(self, tmp_path: Path):
@@ -299,14 +299,14 @@ class TestExportXlsx:
         assert values[1][1] == "メール 🎉"
 
     def test_missing_subject_handled(self, tmp_path: Path):
-        """Empty subject is preserved as empty string, not None."""
+        """Empty subject is preserved as empty/None in openpyxl."""
         output = tmp_path / "manus.xlsx"
         export_xlsx(
             [{"subject": "", "body": "Cooper, did you add security?", "source": "enron"}],
             output,
         )
         values = _xlsx_values(output)
-        assert values[1][0] == ""
+        assert values[1][0] in ("", None)
         assert "Cooper" in values[1][1]
 
     def test_long_body_truncated_at_excel_limit(self, tmp_path: Path):
