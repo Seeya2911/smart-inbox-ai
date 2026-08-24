@@ -1,4 +1,4 @@
-from __future__
+from __future__ import annotations
 
 import pyarrow as pa
 import pyarrow.parquet as pq
