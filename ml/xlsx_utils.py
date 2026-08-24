@@ -81,16 +81,16 @@ def sanitize_for_xlsx(text: str) -> str:
     Safe characters that are deliberately preserved:
     - Tab (\\x09)
     - Line Feed (\\x0A)  — Excel renders multi-line cells correctly
-    - Carriage Return (\\x0D)
     - All printable ASCII (\\x20–\\x7E)
     - All printable Unicode above \\x9F (accented letters, CJK, emoji, etc.)
 
-    Removed characters:
+    Removed/normalized:
     - NUL and other C0 controls except whitespace listed above
     - DEL (\\x7F)
     - C1 controls (\\x80–\\x9F)
     - Unicode surrogates (\\uD800–\\uDFFF)
     - \\uFFFE and \\uFFFF
+    - Normalizes \\r\\n and lone \\r to standard \\n
 
     Args:
         text: Raw string that may contain illegal characters.
@@ -100,6 +100,8 @@ def sanitize_for_xlsx(text: str) -> str:
     """
     if not text:
         return text
+    # Normalize carriage returns and CRLF to standard LF (\n)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     return _ILLEGAL_XML10_CHARS.sub("", text)
 
 
@@ -205,20 +207,29 @@ def validate_workbook(path: Path, expected_headers: list[str] | None = None) -> 
         return {"valid": False, "row_count": 0, "source_counts": {}, "truncated_cells": 0,
                 "errors": [f"File is empty: {path}"]}
 
-    # 2. Valid ZIP structure
+    # 2. Valid ZIP structure and XML syntax validation
     try:
+        import xml.etree.ElementTree as ET
+
         with zipfile.ZipFile(path, "r") as zf:
             names = zf.namelist()
             if "xl/worksheets/sheet1.xml" not in names:
                 errors.append("ZIP is missing xl/worksheets/sheet1.xml")
-            # 3. Check for XML integrity by reading raw sheet XML
+            
+            # Verify all XML parts parse cleanly as valid XML
+            for name in names:
+                if name.endswith(".xml") or name.endswith(".rels"):
+                    raw_content = zf.read(name)
+                    try:
+                        root_elem = ET.fromstring(raw_content)
+                    except ET.ParseError as exc:
+                        errors.append(f"XML parse error in {name}: {exc}")
+
+            # 3. Check for formula tags in worksheet
             if "xl/worksheets/sheet1.xml" in names:
-                raw_xml = zf.read("xl/worksheets/sheet1.xml")
-                # A UTF-8 decode failure would indicate encoding corruption
-                try:
-                    raw_xml.decode("utf-8")
-                except UnicodeDecodeError as exc:
-                    errors.append(f"sheet1.xml is not valid UTF-8: {exc}")
+                sheet_xml = zf.read("xl/worksheets/sheet1.xml").decode("utf-8", errors="replace")
+                if "<f>" in sheet_xml or "<f " in sheet_xml:
+                    errors.append("Worksheet contains <f> formula tags which causes Excel repair warnings")
     except zipfile.BadZipFile as exc:
         errors.append(f"Not a valid ZIP/XLSX file: {exc}")
         return {"valid": False, "row_count": 0, "source_counts": {}, "truncated_cells": 0,

@@ -116,14 +116,23 @@ def write_batches(records: list[dict[str, Any]], output_dir: Path, batch_size: i
         workbook = Workbook()
         sheet = workbook.active
         sheet.title = "emails"
-        sheet.append(["subject", "body", "source"])
-        for record in batch:
+
+        for col_idx, col_name in enumerate(["subject", "body", "source"], start=1):
+            cell = sheet.cell(row=1, column=col_idx)
+            cell.value = col_name
+            cell.data_type = "s"
+
+        for row_offset, record in enumerate(batch, start=2):
             subject_cell, _ = prepare_cell(record["subject"])
             body_cell, _ = prepare_cell(record["body"])
             source_cell, _ = prepare_cell(record["source"])
-            sheet.append([subject_cell, body_cell, source_cell])
+            for col_idx, val in enumerate([subject_cell, body_cell, source_cell], start=1):
+                cell = sheet.cell(row=row_offset, column=col_idx)
+                cell.value = val
+                cell.data_type = "s"
+
         sheet.freeze_panes = "A2"
-        sheet.auto_filter.ref = sheet.dimensions
+        sheet.auto_filter.ref = f"A1:C{len(batch) + 1}"
         sheet.column_dimensions["A"].width = 42
         sheet.column_dimensions["B"].width = 110
         sheet.column_dimensions["C"].width = 22

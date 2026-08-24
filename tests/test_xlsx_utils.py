@@ -84,8 +84,11 @@ class TestSanitizeForXlsx:
     def test_lf_preserved(self):
         assert sanitize_for_xlsx("\x0A") == "\x0A"
 
-    def test_cr_preserved(self):
-        assert sanitize_for_xlsx("\x0D") == "\x0D"
+    def test_cr_normalized_to_lf(self):
+        """Carriage returns are normalized to standard line feeds (\n)."""
+        assert sanitize_for_xlsx("\x0D") == "\x0A"
+        assert sanitize_for_xlsx("a\r\nb") == "a\nb"
+        assert sanitize_for_xlsx("a\rb") == "a\nb"
 
     def test_printable_ascii_preserved(self):
         text = "".join(chr(c) for c in range(0x20, 0x7F))
