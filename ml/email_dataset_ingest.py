@@ -297,7 +297,7 @@ def iter_spamassassin_direct(*, max_rows: int | None, sleep_seconds: float) -> I
 
 def _phishing_file_url(source_dataset: str) -> str:
     filename = urllib.parse.quote(f"{source_dataset}.csv")
-    return urllib.parse.urljoin(HF_DATASET_RESOLVE, filename) + "?download=true"
+    return urllib.parse.urljoin(HF_DATASET_RESOLVE, f"data_raw/{filename}") + "?download=true"
 
 
 def _iter_phishing_csv(source_dataset: str, quota: int) -> Iterable[RawEmailRecord]:
