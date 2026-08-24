@@ -6,36 +6,16 @@ supporting full provenance tracking, ID namespacing, and weak labeling metadata.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Set, Optional
 
 ALLOWED_INTENTS: Set[str] = {
-    "request",
-    "question",
-    "meeting",
-    "notification",
-    "promotion",
-    "complaint",
-    "follow_up",
-    "information",
-    "security",
-    "transactional",
-    "other",
+    "request", "question", "meeting", "notification", "promotion",
+    "complaint", "follow_up", "information", "security", "transactional", "other",
 }
 
-ALLOWED_PRIORITIES: Set[str] = {
-    "high",
-    "medium",
-    "low",
-}
+ALLOWED_PRIORITIES: Set[str] = {"high", "medium", "low"}
 
-ALLOWED_LABEL_SOURCES: Set[str] = {
-    "rules",
-    "llm",
-    "human",
-    "user_feedback",
-    "ground_truth",
-}
-
+ALLOWED_LABEL_SOURCES: Set[str] = {"rules", "llm", "human", "user_feedback", "ground_truth"}
 VALID_SOURCE_PREFIXES: Set[str] = {"enron", "spam", "phishing", "synthetic", "inbox"}
 SUPPORTED_LANGUAGES: Set[str] = {"en", "de", "fr", "es", "unknown"}
 
@@ -80,6 +60,13 @@ class CanonicalEmailExample:
     source_group_id: str = ""
     is_synthetic: bool = False
     provenance: str = ""
+    # Independent rule signal. These fields are metadata, never training features.
+    rule_intent: Optional[str] = None
+    rule_priority: Optional[str] = None
+    llm_rule_agreement: Optional[bool] = None
+    llm_intent_reason: str = ""
+    llm_priority_reason: str = ""
+    label_resolution_reason: str = ""
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not self.id.strip():
@@ -92,6 +79,10 @@ class CanonicalEmailExample:
             raise ValueError(f"Unsupported intent: {self.intent!r}. Must be one of {sorted(ALLOWED_INTENTS)}")
         if self.priority not in ALLOWED_PRIORITIES:
             raise ValueError(f"Unsupported priority: {self.priority!r}. Must be one of {sorted(ALLOWED_PRIORITIES)}")
+        if self.rule_intent is not None and self.rule_intent not in ALLOWED_INTENTS:
+            raise ValueError(f"Unsupported rule_intent: {self.rule_intent!r}")
+        if self.rule_priority is not None and self.rule_priority not in ALLOWED_PRIORITIES:
+            raise ValueError(f"Unsupported rule_priority: {self.rule_priority!r}")
         if self.language not in SUPPORTED_LANGUAGES:
             raise ValueError(f"Unsupported language: {self.language!r}")
         if not (0.0 <= self.label_confidence <= 1.0):
@@ -154,6 +145,12 @@ class CanonicalEmailExample:
             source_group_id=str(data.get("source_group_id", data.get("group_id", ""))).strip(),
             is_synthetic=bool(data.get("is_synthetic", "synthetic" in source.lower())),
             provenance=str(data.get("provenance", source)).strip(),
+            rule_intent=(str(data["rule_intent"]).lower().strip() if data.get("rule_intent") is not None else None),
+            rule_priority=(str(data["rule_priority"]).lower().strip() if data.get("rule_priority") is not None else None),
+            llm_rule_agreement=(bool(data["llm_rule_agreement"]) if data.get("llm_rule_agreement") is not None else None),
+            llm_intent_reason=str(data.get("llm_intent_reason", "")).strip(),
+            llm_priority_reason=str(data.get("llm_priority_reason", "")).strip(),
+            label_resolution_reason=str(data.get("label_resolution_reason", "")).strip(),
         )
 
 
@@ -178,9 +175,7 @@ class CanonicalIntentExample:
         if self.language not in SUPPORTED_LANGUAGES:
             raise ValueError(f"Unsupported language: {self.language!r}")
         if self.canonical_intent not in ALLOWED_INTENTS:
-            raise ValueError(
-                f"Unsupported canonical_intent: {self.canonical_intent!r}. Must be one of {sorted(ALLOWED_INTENTS)}"
-            )
+            raise ValueError(f"Unsupported canonical_intent: {self.canonical_intent!r}. Must be one of {sorted(ALLOWED_INTENTS)}")
         if not isinstance(self.source_dataset, str) or not self.source_dataset.strip():
             raise ValueError("source_dataset must be a non-empty string")
         if not isinstance(self.source_example_id, str) or not self.source_example_id.strip():
@@ -195,10 +190,7 @@ class CanonicalIntentExample:
     def from_dict(cls, data: Dict[str, Any]) -> "CanonicalIntentExample":
         forbidden = {"urgency", "priority"} & set(data.keys())
         if forbidden:
-            raise ValueError(
-                f"Forbidden fields present in canonical intent schema: {sorted(forbidden)}. "
-                "Urgency and priority are intentionally excluded from the intent training stage."
-            )
+            raise ValueError(f"Forbidden fields present in canonical intent schema: {sorted(forbidden)}. Urgency and priority are intentionally excluded from the intent training stage.")
 
         text = str(data.get("text", "")).strip()
         if not text and ("subject" in data or "body" in data):
