@@ -28,8 +28,10 @@ class SmartInboxAssistant:
 
     @staticmethod
     def _build_default_analyzer() -> EmailAnalyzer:
-        # A credential-free mock is the safe default for demos and CI.
-        if not os.getenv("LLM_API_KEY"):
+        # A credential-free mock is the safe default for demos and CI. Support both
+        # the preferred OPENAI_API_KEY and the legacy LLM_API_KEY configuration used
+        # by OpenAI-compatible providers.
+        if not (os.getenv("OPENAI_API_KEY") or os.getenv("LLM_API_KEY")):
             return EmailAnalyzer(MockLLMProvider())
         return EmailAnalyzer(OpenAICompatibleProvider())
 
