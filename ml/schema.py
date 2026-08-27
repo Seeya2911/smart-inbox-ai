@@ -1,7 +1,7 @@
 """Canonical training representation schema for Smart Inbox AI multi-output NLP pipeline.
 
 Defines the canonical dataset schema for multi-output training (INTENT + PRIORITY),
-supporting full provenance tracking, ID namespacing, and weak labeling metadata.
+supporting full provenance tracking, ID namespacing, and LLM/rule labeling metadata.
 """
 from __future__ import annotations
 
@@ -14,8 +14,7 @@ ALLOWED_INTENTS: Set[str] = {
 }
 
 ALLOWED_PRIORITIES: Set[str] = {"high", "medium", "low"}
-
-ALLOWED_LABEL_SOURCES: Set[str] = {"rules", "llm", "human", "user_feedback", "ground_truth"}
+ALLOWED_LABEL_SOURCES: Set[str] = {"rules", "llm", "human", "user_feedback", "ground_truth", "mixed"}
 VALID_SOURCE_PREFIXES: Set[str] = {"enron", "spam", "phishing", "synthetic", "inbox"}
 SUPPORTED_LANGUAGES: Set[str] = {"en", "de", "fr", "es", "unknown"}
 
@@ -53,6 +52,8 @@ class CanonicalEmailExample:
     priority: str
     priority_reasons: List[str] = field(default_factory=list)
     source: str = "synthetic"
+    source_example_id: str = ""
+    source_split: str = "unspecified"
     label_source: str = "rules"
     label_confidence: float = 1.0
     rule_score: float = 0.0
@@ -78,13 +79,15 @@ class CanonicalEmailExample:
         if self.intent not in ALLOWED_INTENTS:
             raise ValueError(f"Unsupported intent: {self.intent!r}. Must be one of {sorted(ALLOWED_INTENTS)}")
         if self.priority not in ALLOWED_PRIORITIES:
-            raise ValueError(f"Unsupported priority: {self.priority!r}. Must be one of {sorted(ALLOWED_PRIORITIES)}")
+            raise ValueError(f"Unsupported priority: {priority!r}. Must be one of {sorted(ALLOWED_PRIORITIES)}")
         if self.rule_intent is not None and self.rule_intent not in ALLOWED_INTENTS:
             raise ValueError(f"Unsupported rule_intent: {self.rule_intent!r}")
         if self.rule_priority is not None and self.rule_priority not in ALLOWED_PRIORITIES:
             raise ValueError(f"Unsupported rule_priority: {self.rule_priority!r}")
         if self.language not in SUPPORTED_LANGUAGES:
             raise ValueError(f"Unsupported language: {self.language!r}")
+        if self.label_source not in ALLOWED_LABEL_SOURCES:
+            raise ValueError(f"Unsupported label_source: {self.label_source!r}")
         if not (0.0 <= self.label_confidence <= 1.0):
             raise ValueError(f"label_confidence must be between 0.0 and 1.0; got {self.label_confidence}")
 
@@ -119,7 +122,7 @@ class CanonicalEmailExample:
 
         label_source = str(data.get("label_source", "rules")).lower().strip()
         if label_source not in ALLOWED_LABEL_SOURCES:
-            label_source = "rules"
+            raise ValueError(f"Unsupported label_source: {label_source!r}")
 
         try:
             confidence = float(data.get("label_confidence", 1.0))
@@ -138,6 +141,8 @@ class CanonicalEmailExample:
             priority=priority,
             priority_reasons=priority_reasons,
             source=source,
+            source_example_id=str(data.get("source_example_id", raw_id)).strip(),
+            source_split=str(data.get("source_split", "unspecified")).strip(),
             label_source=label_source,
             label_confidence=max(0.0, min(1.0, confidence)),
             rule_score=rule_score,
