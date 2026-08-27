@@ -61,7 +61,6 @@ class CanonicalEmailExample:
     source_group_id: str = ""
     is_synthetic: bool = False
     provenance: str = ""
-    # Independent rule signal. These fields are metadata, never training features.
     rule_intent: Optional[str] = None
     rule_priority: Optional[str] = None
     llm_rule_agreement: Optional[bool] = None
@@ -79,7 +78,7 @@ class CanonicalEmailExample:
         if self.intent not in ALLOWED_INTENTS:
             raise ValueError(f"Unsupported intent: {self.intent!r}. Must be one of {sorted(ALLOWED_INTENTS)}")
         if self.priority not in ALLOWED_PRIORITIES:
-            raise ValueError(f"Unsupported priority: {priority!r}. Must be one of {sorted(ALLOWED_PRIORITIES)}")
+            raise ValueError(f"Unsupported priority: {self.priority!r}. Must be one of {sorted(ALLOWED_PRIORITIES)}")
         if self.rule_intent is not None and self.rule_intent not in ALLOWED_INTENTS:
             raise ValueError(f"Unsupported rule_intent: {self.rule_intent!r}")
         if self.rule_priority is not None and self.rule_priority not in ALLOWED_PRIORITIES:
