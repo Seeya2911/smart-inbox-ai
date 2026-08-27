@@ -1,33 +1,12 @@
 """Build a deterministic Manus-ready XLSX from the canonical raw email pool.
 
-The exporter intentionally contains NO Smart Inbox labels. Manus is the teacher:
-this file only selects clean, deduplicated email text and preserves provenance.
+The exporter intentionally contains NO Smart Inbox labels. It selects clean,
+deduplicated email text and preserves provenance in a local manifest so the
+LLM-labeled results can be joined back to the canonical records deterministically.
 
-Input JSONL records are expected to contain at least ``subject``, ``body``, and
-``source``. Optional ``id`` and ``source_example_id`` fields are retained in the
-manifest, not exposed to the labeler. The output workbook has exactly three
-labeling columns: subject, body, source.
-
-Sanitization
-------------
-All cell values are run through :func:`ml.xlsx_utils.sanitize_for_xlsx` which
-removes every character that is illegal in XML 1.0 (and therefore in XLSX/OpenXML).
-This covers the full XML 1.0 illegal set, including the DEL character (\\x7F),
-C1 controls (\\x80–\\x9F), and Unicode surrogates, which an earlier incomplete
-regex missed and caused Microsoft Excel to report a corrupted workbook.
-
-Truncation
-----------
-Excel enforces a hard limit of 32 767 characters per cell.  Bodies that exceed
-this limit are truncated with a ``[TRUNCATED]`` marker so the truncation is
-explicit and auditable.  The manifest records the count of truncated rows.
-
-Validation
-----------
-After the XLSX is written, :func:`ml.xlsx_utils.validate_workbook` re-opens it,
-checks the ZIP/XML structure, validates every cell value, and performs a
-round-trip save/reload.  If validation fails the script exits with a non-zero
-status so the GitHub Actions workflow does not upload a corrupt artifact.
+The output workbook contains exactly three labeling columns: subject, body, source.
+The manifest contains row identity/provenance metadata and is not part of the
+external labeling input.
 """
 from __future__ import annotations
 
@@ -57,11 +36,7 @@ def _content_key(row: dict[str, Any]) -> str:
 
 
 def load_rows(paths: list[Path]) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    """Load, deduplicate, and return rows from canonical JSONL files.
-
-    Returns:
-        ``(rows, stats)`` where *stats* tracks counts of removed rows.
-    """
+    """Load, deduplicate, and return rows from canonical JSONL files."""
     rows: list[dict[str, Any]] = []
     stats: dict[str, int] = {
         "input_rows": 0,
@@ -100,22 +75,12 @@ def load_rows(paths: list[Path]) -> tuple[list[dict[str, Any]], dict[str, int]]:
 
 
 def export_xlsx(rows: list[dict[str, Any]], output: Path) -> dict[str, int]:
-    """Write *rows* to a Manus-ready XLSX at *output*.
-
-    Every cell value is sanitized (illegal XML 1.0 characters removed) and
-    truncated to Excel's 32 767-character per-cell limit. All cells are
-    explicitly stored with data_type="s" (string) so that email text starting
-    with "=" or formatting dividers is never parsed as a formula by Excel.
-
-    Returns:
-        ``{"truncated_rows": n}`` — the number of rows where truncation occurred.
-    """
+    """Write *rows* to a Manus-ready XLSX at *output*."""
     output.parent.mkdir(parents=True, exist_ok=True)
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "emails"
 
-    # Header row
     for col_idx, col_name in enumerate(["subject", "body", "source"], start=1):
         cell = sheet.cell(row=1, column=col_idx)
         cell.value = col_name
@@ -132,7 +97,7 @@ def export_xlsx(rows: list[dict[str, Any]], output: Path) -> dict[str, int]:
         for col_idx, val in enumerate([subject_cell, body_cell, source_cell], start=1):
             cell = sheet.cell(row=row_idx, column=col_idx)
             cell.value = val
-            cell.data_type = "s"  # strictly prevent formula interpretation
+            cell.data_type = "s"
 
     sheet.freeze_panes = "A2"
     sheet.auto_filter.ref = f"A1:C{len(rows) + 1}"
@@ -148,26 +113,40 @@ def write_manifest(
     stats: dict[str, int],
     output: Path,
 ) -> None:
-    """Write a JSON manifest describing the exported corpus."""
+    """Write counts plus deterministic workbook-row-to-source mapping."""
     source_counts: dict[str, int] = {}
-    for row in rows:
+    row_map: list[dict[str, Any]] = []
+    for output_row, row in enumerate(rows, start=2):
         source = row["source"]
         source_counts[source] = source_counts.get(source, 0) + 1
+        row_map.append(
+            {
+                "output_row": output_row,
+                "id": str(row.get("id", "")),
+                "source_example_id": str(row.get("source_example_id", row.get("id", ""))),
+                "source": source,
+                "source_dataset": str(row.get("source_dataset", "")),
+                "source_split": str(row.get("source_split", "unspecified")),
+                "source_group_id": str(row.get("source_group_id", row.get("group_id", ""))),
+                "language": str(row.get("language", "en")),
+                "is_synthetic": bool(row.get("is_synthetic", False)),
+                "provenance": str(row.get("provenance", source)),
+            }
+        )
     payload = {
         **stats,
         "output_rows": len(rows),
         "source_counts": dict(sorted(source_counts.items())),
         "excel_max_cell_chars": EXCEL_MAX_CELL_CHARS,
+        "row_map": row_map,
     }
-    output.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    output.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Export clean canonical emails for Manus labeling"
-    )
+    parser = argparse.ArgumentParser(description="Export clean canonical emails for external labeling")
     parser.add_argument("inputs", nargs="+", type=Path, help="canonical JSONL files")
-    parser.add_argument("--output", type=Path, required=True, help="Manus-ready XLSX")
+    parser.add_argument("--output", type=Path, required=True, help="labeling XLSX")
     parser.add_argument("--manifest", type=Path, default=None)
     args = parser.parse_args()
 
@@ -181,9 +160,6 @@ def main() -> None:
     manifest = args.manifest or args.output.with_suffix(".manifest.json")
     write_manifest(rows, stats, manifest)
 
-    # -----------------------------------------------------------------------
-    # Post-export validation — fails fast if the workbook is corrupt.
-    # -----------------------------------------------------------------------
     print("Validating generated workbook …", flush=True)
     result = validate_workbook(args.output)
     if not result["valid"]:
