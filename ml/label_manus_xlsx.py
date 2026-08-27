@@ -1,12 +1,12 @@
 """Apply the authoritative LLM teacher to a Manus-ready XLSX corpus.
 
-The workbook intentionally contains only subject/body/source.  The local manifest
-provides stable source identity and provenance for each workbook row.  The LLM
+The workbook intentionally contains only subject/body/source. The local manifest
+provides stable source identity and provenance for each workbook row. The LLM
 produces the production intent + priority labels; the deterministic rule engine is
 run independently and retained only as a disagreement/provenance signal.
 
 This tool deliberately has no human-review fields and does not use an LLM label as
-"ground truth".  Its output is a pseudo-labeled training candidate that must remain
+"ground truth". Its output is a pseudo-labeled training candidate that must remain
 separate from the protected evaluation set.
 """
 from __future__ import annotations
@@ -14,12 +14,12 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Set
+from typing import Any, Dict, List, Set
 
 from openpyxl import load_workbook
 
-from ml.llm_labeler import LLMClient, OpenAILLMClient, label_example, write_jsonl
-from ml.schema import CanonicalEmailExample
+from ml.llm_labeler import LLMClient, OpenAILLMClient, label_example
+from ml.schema import CanonicalEmailExample, format_namespaced_id
 
 EXPECTED_HEADERS = ["subject", "body", "source"]
 
@@ -47,7 +47,10 @@ def _placeholder_example(row_number: int, row: List[Any], metadata: Dict[str, An
     source = str(metadata.get("source", row[2] if row[2] is not None else "")).strip()
     if not body:
         raise ValueError(f"Workbook row {row_number} has empty body")
-    raw_id = str(metadata.get("id", f"row-{row_number}")).strip() or f"row-{row_number}"
+    source_id = str(metadata.get("id", "")).strip()
+    if not source_id:
+        source_id = f"row-{row_number}"
+    raw_id = format_namespaced_id(source, source_id)
     return CanonicalEmailExample(
         id=raw_id,
         subject=subject,
@@ -55,7 +58,7 @@ def _placeholder_example(row_number: int, row: List[Any], metadata: Dict[str, An
         intent="other",
         priority="low",
         source=source,
-        source_example_id=str(metadata.get("source_example_id", raw_id)),
+        source_example_id=str(metadata.get("source_example_id", source_id)),
         source_split=str(metadata.get("source_split", "unspecified")),
         label_source="rules",
         language=str(metadata.get("language", "en")).lower().strip() or "en",
