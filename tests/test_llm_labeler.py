@@ -20,7 +20,11 @@ def make_example():
         intent="information",
         priority="low",
         source="enron",
+        source_example_id="001",
+        source_split="train",
+        source_group_id="thread-1",
         label_source="rules",
+        provenance="corbt/enron-emails",
     )
 
 
@@ -45,6 +49,7 @@ def test_llm_is_authoritative_when_rule_disagrees():
     assert labeled.rule_intent != "security"
     assert labeled.llm_rule_agreement is False
     assert labeled.label_confidence == pytest.approx(0.91)
+    assert labeled.label_resolution_reason
     assert "LLM intent 'security' was selected over rule intent" in labeled.label_resolution_reason
 
 
@@ -56,6 +61,8 @@ def test_llm_label_wins_and_disagreement_is_recorded():
         intent="request",
         priority="low",
         source="enron",
+        source_example_id="002",
+        source_split="train",
         label_source="rules",
     )
     llm = FakeLLM(
@@ -77,6 +84,9 @@ def test_llm_label_wins_and_disagreement_is_recorded():
     assert labeled.llm_rule_agreement is False
     assert "LLM intent 'question' was selected over rule intent 'request'" in labeled.label_resolution_reason
     assert "primarily asks for confirmation" in labeled.label_resolution_reason
+    assert labeled.source_example_id == "002"
+    assert labeled.source_split == "train"
+    assert labeled.provenance == example.provenance
 
 
 def test_invalid_llm_intent_is_rejected():

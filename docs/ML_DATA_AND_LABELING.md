@@ -2,22 +2,25 @@
 
 ## Status
 
-Version: `v1`
+Version: `v2`
 
 This document defines the training target for the Smart Inbox ML system. It deliberately separates **intent** from **priority**. The two labels answer different questions and must not be collapsed into a single class.
 
-The existing two-class `information/request` auxiliary benchmark remains useful for validating the ML pipeline, but it is **not** the target production taxonomy.
+The historical two-class `information/request` auxiliary benchmark remains useful for pipeline regression tests, but it is **not** the target production taxonomy.
 
 ## Core rules
 
-1. Do not use synthetic text as a replacement for real email data. Synthetic examples are gap-fillers for categories that public corpora do not cover well.
-2. Rule-based outputs are weak labels. A rule score is a heuristic signal, not a probability or ground truth.
-3. Human-reviewed examples are the strongest supervised labels in the initial dataset.
-4. LLM-reviewed labels are reviewed labels, not automatically trusted ground truth. They must be tracked separately from human labels.
-5. User feedback is behavioral evidence and candidate labeling data; it is not automatically a correct label.
-6. Every training example must preserve provenance and label provenance.
-7. The protected gold test set must never be pseudo-labeled, used for training, or used to tune thresholds.
-8. Duplicate and near-duplicate content must remain isolated across splits.
+1. Real public email corpora are the primary data source. Synthetic text is only a documented gap-filler.
+2. Intent and priority are two independent predictions.
+3. The LLM is the **authoritative teacher** for the initial pseudo-labeled corpus.
+4. Rule-based predictions are **not ground truth and never override the LLM**. They are retained as an independent comparison signal and disagreement feature.
+5. When rules and the LLM disagree, the LLM label is used for training and `label_resolution_reason` records why the LLM interpretation won.
+6. The LLM's self-reported confidence is a teacher certainty signal, not a calibrated probability. It must not be treated as measured model accuracy.
+7. No human-review stage is required for the initial corpus-generation pipeline. Human labels can be introduced later as an independent validation set if needed.
+8. User feedback is behavioral evidence/candidate labeling data; it is not automatically a correct label.
+9. Every training example must preserve source and label provenance.
+10. Duplicate and near-duplicate content must remain isolated across splits.
+11. The LLM-labeled test split is a **teacher-agreement benchmark**, not a ground-truth benchmark. Do not report it as human accuracy.
 
 ## Target labels
 
@@ -25,129 +28,124 @@ The existing two-class `information/request` auxiliary benchmark remains useful 
 
 Every email receives exactly one **primary intent** for the first supervised model.
 
-| Label | Definition | Positive examples | Do not use for |
-|---|---|---|---|
-| `request` | The sender is asking the recipient to perform an action. | "Please send me the signed form." | Pure questions that only seek information. |
-| `question` | The primary purpose is to obtain information or an answer. | "What time does the meeting start?" | Requests that clearly ask the recipient to perform an action. |
-| `meeting` | Scheduling, changing, cancelling, or coordinating a meeting/appointment/call is the primary purpose. | "Can we move our meeting to 3pm?" | General requests that mention a meeting incidentally. |
-| `notification` | The email primarily informs the recipient that something happened or changed, without requiring a substantive response. | "Your package has shipped." | Security incidents requiring action. |
-| `promotion` | Marketing, advertising, sales, offers, newsletters, or promotional content is the primary purpose. | "20% off this weekend." | Transactional receipts/order confirmations that are not marketing. |
-| `complaint` | The sender is expressing dissatisfaction or reporting a service/product problem as the primary purpose. | "The replacement you sent is still broken." | Neutral support requests without a complaint component. |
-| `follow_up` | The email primarily follows up on an earlier request, commitment, conversation, or unresolved issue. | "Following up on my application from last week." | A new request that merely references an earlier conversation. |
-| `information` | The primary purpose is to provide or share useful information rather than request action. | "Here are the documents from yesterday's call." | Notifications about a discrete event when notification is clearly primary. |
-| `other` | The email cannot be assigned to one of the defined intents without forcing a weak interpretation. | Ambiguous or genuinely out-of-taxonomy content. | Do not use merely because labeling is inconvenient. |
+Allowed labels:
 
-### Intent tie-breaking rules
+- `request` — sender asks recipient to perform an action.
+- `question` — primary purpose is obtaining information or an answer.
+- `meeting` — scheduling/changing/cancelling/coordinating a meeting or appointment.
+- `notification` — automated/system update, digest, newsletter, or policy notice.
+- `promotion` — marketing, advertising, sales, offers, newsletters, or promotional content.
+- `complaint` — dissatisfaction or service/product problem is central.
+- `follow_up` — follows up on an earlier request, commitment, conversation, or unresolved issue.
+- `information` — primarily shares useful information without a clear request/question.
+- `security` — authentication, account security, suspicious activity, password/2FA/security events.
+- `transactional` — purchases, receipts, invoices, payments, shipping, orders.
+- `other` — none of the above is defensible.
 
-Emails can contain multiple intents. The model currently predicts one primary intent, so annotators must use a consistent hierarchy based on the **main communicative purpose**:
+### Intent tie-breaking
 
-1. `meeting` when scheduling/coordinating a meeting is the central action.
-2. `complaint` when dissatisfaction/problem reporting is central.
-3. `follow_up` when the central purpose is pursuing an unresolved prior interaction.
-4. `request` when the sender primarily wants the recipient to do something.
-5. `question` when the sender primarily wants an answer.
-6. `promotion` when commercial/promotional messaging is central.
-7. `notification` when the sender primarily reports an event/state change.
-8. `information` when the sender primarily shares information.
-9. `other` only when none of the above is defensible.
+When an email contains multiple intents, choose the primary communicative purpose in this order:
 
-This ordering is a tie-breaker, not a claim that one intent is inherently more important than another.
+1. `meeting`
+2. `complaint`
+3. `follow_up`
+4. `request`
+5. `question`
+6. `promotion`
+7. `notification`
+8. `information`
+9. `other`
+
+This is a tie-breaker, not an importance ranking.
 
 ### Priority
 
-Priority is independent of intent and reflects **how important and time-sensitive it is for the recipient to act or pay attention**, given the email context.
+Priority is independent of intent and reflects how important and time-sensitive it is for the recipient to act or pay attention.
 
-| Label | Definition | Typical evidence |
-|---|---|---|
-| `high` | Failure to act or pay attention soon could cause meaningful harm, loss, security impact, missed critical deadline, or serious consequence. | Active security compromise, deadline today, critical operational interruption, immediate action required. |
-| `medium` | Worth timely attention, but delay is unlikely to cause serious harm. | Routine work request, upcoming meeting change, non-critical account issue, ordinary follow-up. |
-| `low` | No meaningful time pressure or consequence from delaying attention. | Routine notification, ordinary receipt, newsletter, promotion, general information. |
+- `high` — delay could cause meaningful harm, loss, security impact, critical deadline miss, or serious consequence.
+- `medium` — worth timely attention, but delay is unlikely to cause serious harm.
+- `low` — no meaningful time pressure or consequence from delaying attention.
 
-Priority must be assigned from context rather than keywords. The presence of words such as `urgent`, `important`, or `ASAP` is evidence, not a label by itself.
+Priority must be contextual. `urgent`, `important`, and `ASAP` are evidence, not labels by themselves.
 
 Examples:
 
-- "Your order has shipped." → intent `notification`, priority `low`.
-- "Your password was changed. If this wasn't you, secure your account now." → intent `notification`, priority `high`.
-- "Can we move tomorrow's meeting to 3pm?" → intent `meeting`, priority `medium` unless the email establishes a higher/lower consequence.
-- "URGENT: 50% off today only!" → intent `promotion`, priority `low` unless the recipient's context establishes a real consequence.
+- "Your order has shipped." → `notification`, `low`.
+- "Your password was changed. If this wasn't you, secure your account now." → `security` or `notification` depending on the primary communicative purpose, `high`.
+- "Can we move tomorrow's meeting to 3pm?" → `meeting`, usually `medium`.
+- "URGENT: 50% off today only!" → `promotion`, usually `low`.
 
-## Required dataset record
-
-The canonical record should preserve enough information to reconstruct how a label was obtained:
+## Canonical dataset record
 
 ```json
 {
-  "id": "stable-example-id",
+  "id": "enron_123",
   "subject": "Email subject",
   "body": "Email body",
   "intent": "request",
   "priority": "medium",
   "priority_reasons": ["action_required"],
   "source": "enron",
-  "source_example_id": "original-id",
+  "source_example_id": "123",
   "source_split": "train",
-  "label_source": "human",
-  "label_confidence": 1.0,
-  "rule_score": null,
+  "label_source": "llm",
+  "label_confidence": 0.92,
+  "rule_score": 7.0,
+  "rule_intent": "request",
+  "rule_priority": null,
+  "llm_rule_agreement": true,
+  "llm_intent_reason": "The sender asks the recipient to act.",
+  "llm_priority_reason": "The requested action is useful but not time-critical.",
+  "label_resolution_reason": "LLM and rule signals agree; the LLM remains authoritative.",
   "is_synthetic": false,
   "language": "en",
-  "provenance": "human-reviewed-v1"
+  "provenance": "corbt/enron-emails"
 }
 ```
 
-### Label provenance
+`source_example_id` and `source_split` must survive every conversion stage so a labeled row can be traced back to its raw source.
 
-Allowed `label_source` values should distinguish at least:
+## Labeling workflow
 
-- `human` — directly reviewed by a human annotator.
-- `llm` — assigned by an LLM review process and not yet human-confirmed.
-- `rules` — generated by the deterministic weak-label system.
-- `user_feedback` — supplied as an explicit user correction.
-- `mixed` — a later adjudicated label based on multiple sources.
+1. Ingest real corpora without assigning Smart Inbox labels.
+2. Deduplicate and perform coverage analysis before labeling.
+3. Export the clean corpus to the external labeling format (`subject`, `body`, `source`) while retaining a local manifest that maps workbook rows back to source identity.
+4. Run the LLM teacher over the complete corpus. The LLM emits exactly one intent, one priority, reasons, and a self-reported certainty score.
+5. Run the deterministic rule engine independently on the same email.
+6. Keep the LLM label whenever the two disagree. Preserve the rule output and an explicit resolution reason; never silently overwrite the disagreement.
+7. Keep all LLM-labeled rows, including low-confidence or rule-disagreement cases. Do not train only on easy rule matches.
+8. Split the resulting canonical corpus using group-aware and near-duplicate-aware logic before model training.
+9. Train the lightweight student model on the training split only.
+10. Use validation for model/threshold selection. Keep the test split untouched by training.
 
-`label_confidence` is only meaningful when its definition is documented for the relevant label source. The current rule tagger's numeric score must remain in `rule_score`; it must not be renamed to confidence without calibration evidence.
+## What the evaluation means
+
+Because the initial labels are generated by the same LLM teacher used to create the training corpus, the resulting test set does **not** provide independent truth. Student metrics on that split answer:
+
+> "How well does the lightweight classifier reproduce the teacher's labeling policy on unseen, leakage-isolated emails?"
+
+They do **not** answer:
+
+> "How accurate is the classifier on objectively correct human labels?"
+
+For a defensible real-world accuracy claim, add an independent human-reviewed test set later or use an independently sourced labeling process. This is not part of the initial automated labeling loop.
 
 ## Data-source policy
 
-### Real public data
+Prefer real email corpora for language variation and realistic formatting. Track original dataset and original identifier for every row.
 
-Prefer real email corpora for general language variation and realistic formatting. Track the original dataset and original identifier for every row.
+Synthetic examples are allowed only to fill documented gaps such as modern security alerts, 2FA messages, receipts, invoices, and other patterns absent from older public corpora. Mark them explicitly with `is_synthetic: true` and `source: synthetic`.
 
-### Synthetic data
+Synthetic generation should include realistic variation: short/long messages, typos, signatures, forwarded/replied content, vague language, mixed intents, contradictory urgency signals, false urgency words, and urgent cases with no obvious urgency keyword.
 
-Synthetic examples are allowed only to fill documented coverage gaps such as modern security alerts, 2FA messages, receipts, invoices, and other patterns absent from older public corpora. Synthetic data must be explicitly marked `is_synthetic: true` and `source: synthetic`.
+User inbox data must not be committed to the repository. It should be processed locally through the future IMAP ingestion path with privacy controls and consent.
 
-Synthetic generation should deliberately include realistic variation: short and long messages, typos, signatures, forwarded/replied content, vague language, mixed intents, contradictory urgency signals, false urgency words, and urgent cases with no obvious urgency keyword.
+## Deferred learning loop
 
-### User inbox
+Reinforcement learning, Q-learning, online learning, and preference optimization are **not** part of the initial training loop. They require enough real interaction/reward data to justify their complexity.
 
-Real mailbox data must not be committed to the repository. It should be processed locally through the future IMAP ingestion path and must retain privacy controls and consent requirements.
+The future loop is:
 
-## Gold evaluation set
+`IMAP -> ingestion -> LLM/rule teacher pipeline -> student classifier -> prediction -> explicit user correction/behavioral evidence -> curated feedback dataset -> retraining`
 
-Create the gold set before bulk pseudo-labeling.
-
-Recommended eventual size: approximately 300–500 carefully reviewed emails, with coverage across every intent and priority class. The gold test split must be immutable for model development.
-
-Required discipline:
-
-- `gold/train` may be used for supervised training/checks.
-- `gold/validation` may be used for model/threshold selection.
-- `gold/test` is evaluation-only.
-- Rules, LLM pseudo-labeling, threshold tuning, and model training must not inspect `gold/test` labels.
-
-Evaluation must report overall and per-class metrics, including macro F1, and should be broken down by data source when enough examples exist.
-
-## Weak-label workflow
-
-1. Run deterministic rules and store the resulting `rule_score` and reasoning.
-2. High-score examples become pseudo-label candidates only after the score has been validated against a human-reviewed sample.
-3. Ambiguous examples go to an LLM/human review queue.
-4. Low-signal examples remain in an unlabeled pool; do not silently discard them.
-5. Ensure a meaningful portion of reviewed ambiguous examples enters training so the model does not simply learn the obvious rule patterns.
-6. Preserve all label-source metadata so experiments can compare rule, LLM, human, and user-feedback supervision.
-
-## What is explicitly deferred
-
-Reinforcement learning, Q-learning, online learning, and preference optimization are not part of the initial training loop. They require enough real interaction/reward data to justify their complexity. Existing feedback/Q-learning components may remain in the repository but must not contaminate the initial supervised benchmark.
+Existing feedback/Q-learning components may remain in the repository but must not contaminate the initial supervised benchmark.

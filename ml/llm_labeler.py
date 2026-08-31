@@ -4,9 +4,8 @@ The LLM is the authoritative pseudo-labeler. The rule engine is evaluated
 independently and retained only as provenance, disagreement evidence, and a
 future fallback signal. Rule predictions never override LLM labels.
 
-The module is deliberately side-effect free at import time: an API key is
-required only when the CLI/client is actually used. This keeps CI and unit
-tests independent of external credentials.
+API credentials are read only when the real client is instantiated, keeping
+imports and tests credential-free.
 """
 from __future__ import annotations
 
@@ -166,6 +165,8 @@ def label_example(
         priority=llm.priority,
         priority_reasons=llm.priority_reasons,
         source=example.source,
+        source_example_id=example.source_example_id,
+        source_split=example.source_split,
         label_source="llm",
         label_confidence=llm.confidence,
         rule_score=rule_score,
