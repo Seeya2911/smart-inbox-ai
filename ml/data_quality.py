@@ -237,3 +237,218 @@ def check_split_leakage(
         if len(leakage_records) > 10:
             error_msg += f"\n... and {len(leakage_records) - 10} more leakage instances."
         raise DataLeakageError(error_msg)
+
+
+# ---------------------------------------------------------------------------
+# Multi-output (CanonicalEmailExample) quality + leakage checks
+# ---------------------------------------------------------------------------
+
+from ml.schema import ALLOWED_PRIORITIES, CanonicalEmailExample  # noqa: E402
+
+
+def check_email_dataset_integrity(
+    examples: List["CanonicalEmailExample"],
+    allow_internal_duplicates: bool = False,
+) -> Dict[str, int]:
+    """Validate cleanliness of a multi-output (intent + priority) dataset.
+
+    Checks performed:
+    - Empty dataset
+    - Empty body
+    - Missing or invalid intent (must be one of 11 ALLOWED_INTENTS)
+    - Missing or invalid priority (must be one of 3 ALLOWED_PRIORITIES)
+    - Duplicate example IDs
+    - Conflicting intent labels for identical IDs
+    - Conflicting priority labels for identical IDs
+    - Duplicate normalized text (optional)
+
+    Raises DataQualityError on any violation.
+    Returns summary statistics dict on success.
+    """
+    if not examples:
+        raise DataQualityError("Dataset is empty; cannot run quality checks.")
+
+    # 1. Per-example field checks
+    for idx, ex in enumerate(examples):
+        body = ex.body.strip() if isinstance(ex.body, str) else ""
+        if not body:
+            raise DataQualityError(
+                f"Empty body at index {idx} (id={ex.id!r})"
+            )
+        if ex.intent not in ALLOWED_INTENTS:
+            raise DataQualityError(
+                f"Invalid intent {ex.intent!r} at index {idx} (id={ex.id!r}). "
+                f"Must be one of {sorted(ALLOWED_INTENTS)}"
+            )
+        if ex.priority not in ALLOWED_PRIORITIES:
+            raise DataQualityError(
+                f"Invalid priority {ex.priority!r} at index {idx} (id={ex.id!r}). "
+                f"Must be one of {sorted(ALLOWED_PRIORITIES)}"
+            )
+
+    # 2. Duplicate ID checks
+    id_to_intents: Dict[str, Set[str]] = defaultdict(set)
+    id_to_priorities: Dict[str, Set[str]] = defaultdict(set)
+    id_count: Dict[str, int] = defaultdict(int)
+    for ex in examples:
+        id_to_intents[ex.id].add(ex.intent)
+        id_to_priorities[ex.id].add(ex.priority)
+        id_count[ex.id] += 1
+
+    # Conflicting labels for same ID
+    conflict_intent = {eid: v for eid, v in id_to_intents.items() if len(v) > 1}
+    if conflict_intent:
+        sample_eid, sample_intents = next(iter(conflict_intent.items()))
+        raise DataQualityError(
+            f"Conflicting intent labels for {len(conflict_intent)} IDs. "
+            f"Example id={sample_eid!r} has intents: {sorted(sample_intents)}"
+        )
+    conflict_priority = {eid: v for eid, v in id_to_priorities.items() if len(v) > 1}
+    if conflict_priority:
+        sample_eid, sample_pris = next(iter(conflict_priority.items()))
+        raise DataQualityError(
+            f"Conflicting priority labels for {len(conflict_priority)} IDs. "
+            f"Example id={sample_eid!r} has priorities: {sorted(sample_pris)}"
+        )
+
+    # Duplicate IDs (same ID more than once, even with same label)
+    dup_ids = {eid: cnt for eid, cnt in id_count.items() if cnt > 1}
+    if dup_ids:
+        raise DataQualityError(
+            f"Duplicate IDs found: {len(dup_ids)} IDs appear more than once. "
+            f"Examples: {list(dup_ids.items())[:5]}"
+        )
+
+    # 3. Duplicate normalized text
+    if not allow_internal_duplicates:
+        seen_norm: Set[str] = set()
+        dup_texts: List[str] = []
+        for ex in examples:
+            norm = normalize_text(ex.full_text)
+            if norm in seen_norm:
+                dup_texts.append(norm)
+            seen_norm.add(norm)
+        if dup_texts:
+            raise DataQualityError(
+                f"Duplicate normalized text found ({len(dup_texts)} duplicates). "
+                f"Sample: {dup_texts[0][:80]!r}"
+            )
+
+    return {
+        "total_checked": len(examples),
+        "unique_ids": len(id_count),
+        "unique_normalized_texts": len({normalize_text(ex.full_text) for ex in examples}),
+    }
+
+
+def check_split_leakage_email(
+    train_examples: List["CanonicalEmailExample"],
+    val_examples: List["CanonicalEmailExample"],
+    test_examples: List["CanonicalEmailExample"],
+    near_duplicate_threshold: float = 0.85,
+) -> None:
+    """Check for data leakage between train, val, and test splits for multi-output pipeline.
+
+    Checks:
+    - Exact ID overlap
+    - Normalized-text overlap
+    - Source-group overlap
+    - Near-duplicate overlap (character n-gram Jaccard)
+
+    Raises DataLeakageError if any overlap is found.
+    """
+    splits: Dict[str, List["CanonicalEmailExample"]] = {
+        "train": train_examples,
+        "val": val_examples,
+        "test": test_examples,
+    }
+    split_names = list(splits.keys())
+    leakage_records: List[str] = []
+
+    # 1. ID overlap
+    split_ids: Dict[str, Set[str]] = {
+        name: {ex.id for ex in exs} for name, exs in splits.items()
+    }
+    for i in range(len(split_names)):
+        for j in range(i + 1, len(split_names)):
+            s1, s2 = split_names[i], split_names[j]
+            overlap = split_ids[s1] & split_ids[s2]
+            if overlap:
+                leakage_records.append(
+                    f"[ID Leakage] {len(overlap)} IDs overlap between '{s1}' and '{s2}'. "
+                    f"Sample: {sorted(overlap)[:5]}"
+                )
+
+    # 2. Source-group overlap
+    split_groups: Dict[str, Set[str]] = {
+        name: {ex.source_group_id or ex.id for ex in exs}
+        for name, exs in splits.items()
+    }
+    for i in range(len(split_names)):
+        for j in range(i + 1, len(split_names)):
+            s1, s2 = split_names[i], split_names[j]
+            overlap = split_groups[s1] & split_groups[s2]
+            if overlap:
+                leakage_records.append(
+                    f"[Source-Group Leakage] {len(overlap)} group IDs overlap between '{s1}' and '{s2}'. "
+                    f"Sample: {sorted(overlap)[:5]}"
+                )
+
+    # 3. Normalized text overlap
+    norm_text_map: Dict[str, Dict[str, Set[str]]] = defaultdict(lambda: defaultdict(set))
+    for split_name, exs in splits.items():
+        for ex in exs:
+            norm = normalize_text(ex.full_text)
+            norm_text_map[norm][split_name].add(ex.id)
+
+    for norm_text, split_dict in norm_text_map.items():
+        if len(split_dict) > 1:
+            involved = sorted(split_dict.keys())
+            ids_str = ", ".join(f"{s}: {sorted(split_dict[s])}" for s in involved)
+            leakage_records.append(
+                f"[Normalized Text Overlap] Text {norm_text[:60]!r} spans splits "
+                f"({', '.join(involved)}). IDs: {ids_str}"
+            )
+
+    # 4. Near-duplicate check (across splits)
+    split_cache = {
+        name: [
+            (ex.id, normalize_text(ex.full_text), len(normalize_text(ex.full_text)), set(normalize_text(ex.full_text).split()))
+            for ex in exs
+        ]
+        for name, exs in splits.items()
+    }
+    for i in range(len(split_names)):
+        for j in range(i + 1, len(split_names)):
+            s1_name, s2_name = split_names[i], split_names[j]
+            s1_cached = [item for item in split_cache[s1_name] if item[2] >= 15]
+            s2_cached = [item for item in split_cache[s2_name] if item[2] >= 15]
+            for id1, norm1, len1, w1 in s1_cached:
+                for id2, norm2, len2, w2 in s2_cached:
+                    if norm1 == norm2:
+                        continue
+                    if min(len1, len2) / max(len1, len2) < 0.70:
+                        continue
+                    w_inter = len(w1 & w2)
+                    if not w_inter:
+                        continue
+                    w_sim = w_inter / len(w1 | w2)
+                    if w_sim < 0.35:
+                        continue
+                    sim = compute_ngram_jaccard(norm1, norm2, n=4)
+                    if sim >= near_duplicate_threshold:
+                        leakage_records.append(
+                            f"[Near-Dup Leakage] {s1_name} id={id1!r} vs {s2_name} id={id2!r} "
+                            f"similarity={sim:.3f}"
+                        )
+
+    if leakage_records:
+        error_msg = (
+            f"DATA LEAKAGE DETECTED in email splits! "
+            f"{len(leakage_records)} overlap(s):\n"
+            + "\n".join(leakage_records[:10])
+        )
+        if len(leakage_records) > 10:
+            error_msg += f"\n... and {len(leakage_records) - 10} more."
+        raise DataLeakageError(error_msg)
+
