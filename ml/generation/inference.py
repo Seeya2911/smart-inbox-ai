@@ -29,49 +29,57 @@ def parse_action_output(
     raw_model_text: str,
     subject: str,
     body: str,
-    intent: Optional[str] = None,
 ) -> SuggestedAction:
     """Parse raw model text into a validated, structured SuggestedAction object.
 
-    Uses deterministic fallback parsing to ensure strict adherence to ALLOWED_ACTION_TYPES
-    and zero invented/hallucinated calendar attributes.
+    Post-processing rules:
+    - Parses explicit model output into ALLOWED_ACTION_TYPES
+    - Does NOT infer action from intent or keywords
+    - Safely nulls unsupported fields
+    - If raw model output is malformed or not an allowed action type, falls back to 'none'
     """
-    clean_raw = raw_model_text.strip().lower()
+    clean_raw = (raw_model_text or "").strip().lower()
     full_text = f"{subject} {strip_email_boilerplate(body)}"
 
-    # 1. Determine action_type
+    # 1. Match explicit action type strictly from what the model generated
     action_type = "none"
+    matched_explicit = False
 
-    if any(k in clean_raw for k in ["none", "no action", "informational", "n/a", "no task"]):
-        action_type = "none"
-    elif "calendar" in clean_raw or "meeting" in clean_raw or "schedule" in clean_raw or intent == "meeting":
-        action_type = "create_calendar_event"
-    elif "reply" in clean_raw or "respond" in clean_raw or "answer" in clean_raw:
-        action_type = "reply"
-    elif "reminder" in clean_raw:
-        action_type = "create_reminder"
-    elif "review" in clean_raw or "read" in clean_raw:
-        action_type = "review_document"
-    elif "follow up" in clean_raw or "follow_up" in clean_raw or intent == "follow_up":
-        action_type = "follow_up"
-    elif "contact" in clean_raw or "call" in clean_raw:
-        action_type = "contact_sender"
-    elif any(k in clean_raw for k in ["task", "submit", "send", "action", "pay", "reset", "approve", "verify"]):
-        action_type = "create_task"
-    elif intent in ["request", "security"]:
-        action_type = "create_task"
+    # Check for direct allowed type mentions in raw text
+    for act in sorted(ALLOWED_ACTION_TYPES, key=lambda x: -len(x)):
+        if act != "none" and (clean_raw.startswith(act) or f"action_type: {act}" in clean_raw or f"action: {act}" in clean_raw or clean_raw == act):
+            action_type = act
+            matched_explicit = True
+            break
+
+    if not matched_explicit:
+        if any(k in clean_raw for k in ["none", "no action", "no task", "informational", "n/a"]):
+            action_type = "none"
+        elif clean_raw.startswith("create_calendar_event") or clean_raw.startswith("calendar"):
+            action_type = "create_calendar_event"
+        elif clean_raw.startswith("reply") or clean_raw.startswith("respond"):
+            action_type = "reply"
+        elif clean_raw.startswith("create_reminder") or clean_raw.startswith("reminder"):
+            action_type = "create_reminder"
+        elif clean_raw.startswith("review_document") or clean_raw.startswith("review"):
+            action_type = "review_document"
+        elif clean_raw.startswith("follow_up") or clean_raw.startswith("follow up"):
+            action_type = "follow_up"
+        elif clean_raw.startswith("contact_sender") or clean_raw.startswith("contact"):
+            action_type = "contact_sender"
+        elif clean_raw.startswith("create_task") or clean_raw.startswith("task"):
+            action_type = "create_task"
+        else:
+            # Unrecognized model output -> do NOT manufacture an action
+            action_type = "none"
 
     if action_type == "none":
-        return SuggestedAction(action_type="none")
+        return SuggestedAction(action_type="none", title=raw_model_text.strip() if raw_model_text else None)
 
-    # 2. Extract Evidence & Title
-    title = None
-    if raw_model_text and len(raw_model_text) > 3 and not raw_model_text.lower().startswith("none"):
-        title = raw_model_text[:120].strip()
-    elif subject:
-        title = f"Action for: {subject[:100].strip()}"
+    # 2. Extract Title from model output
+    title = raw_model_text.strip() if len(raw_model_text.strip()) > 3 else f"Action for: {subject[:100].strip()}"
 
-    # 3. Extract dates & times only if supported in text
+    # 3. Extract dates & times only if explicitly present in email text
     date_match = _DATE_EXTRACTION_RE.search(full_text)
     due_date = date_match.group(0).strip() if date_match else None
 
@@ -80,13 +88,15 @@ def parse_action_output(
 
     # 4. Extract evidence snippet
     evidence_snippet = None
-    first_sentence = full_text.split(".")[0].strip()
-    if len(first_sentence) > 10:
-        evidence_snippet = first_sentence[:200]
+    clean_body = strip_email_boilerplate(body)
+    if clean_body:
+        first_sentence = clean_body.split(".")[0].strip()
+        if len(first_sentence) > 10:
+            evidence_snippet = first_sentence[:200]
 
     return SuggestedAction(
         action_type=action_type,
-        title=title,
+        title=title[:150],
         description=f"Action required from email: {subject[:80]}",
         due_date=due_date,
         due_time=due_time,
@@ -100,18 +110,22 @@ def summarize_email(
     intent: Optional[str] = None,
     priority: Optional[str] = None,
     model: Optional[LocalGenerationModel] = None,
-) -> str:
-    """Generate a concise, factual summary of an email using the local FLAN-T5 model."""
+) -> Tuple[str, str]:
+    """Generate summary of email using local FLAN-T5 model.
+
+    Returns:
+        (clean_summary, raw_model_summary)
+    """
     if model is None:
         model = load_model()
 
     clean_body = strip_email_boilerplate(body or "")
     if len(clean_body) < 15 and len(subject or "") < 15:
-        # Handle ultra-short emails directly and gracefully
-        return f"{subject.strip()}: {clean_body.strip()}".strip(" :")
+        res = f"{subject.strip()}: {clean_body.strip()}".strip(" :")
+        return res, res
 
     prompt = build_summarization_prompt(subject, body, intent=intent, priority=priority)
-    summary = model.generate(
+    raw_summary = model.generate(
         prompt,
         max_new_tokens=96,
         min_length=8,
@@ -119,11 +133,10 @@ def summarize_email(
         length_penalty=1.0,
     )
 
-    # Post-clean summary output
-    clean_summary = summary.strip()
+    clean_summary = raw_summary.strip()
     if not clean_summary:
         clean_summary = f"{subject.strip()}. {clean_body[:100].strip()}..."
-    return clean_summary
+    return clean_summary, raw_summary
 
 
 def extract_action(
@@ -132,15 +145,14 @@ def extract_action(
     intent: Optional[str] = None,
     priority: Optional[str] = None,
     model: Optional[LocalGenerationModel] = None,
-) -> SuggestedAction:
-    """Extract a structured SuggestedAction from an email message using local FLAN-T5."""
+) -> Tuple[SuggestedAction, str]:
+    """Extract action from email using local FLAN-T5 model without heuristic keyword replacement.
+
+    Returns:
+        (parsed_action, raw_model_action_text)
+    """
     if model is None:
         model = load_model()
-
-    clean_body = strip_email_boilerplate(body or "")
-    # Non-actionable intents shortcut
-    if intent in ["promotion", "other", "notification"] and not any(k in body.lower() for k in ["deadline", "action required", "urgent"]):
-        return SuggestedAction(action_type="none")
 
     prompt = build_action_extraction_prompt(subject, body, intent=intent, priority=priority)
     raw_action_text = model.generate(
@@ -150,8 +162,8 @@ def extract_action(
         num_beams=2,
     )
 
-    structured_action = parse_action_output(raw_action_text, subject, body, intent=intent)
-    return structured_action
+    structured_action = parse_action_output(raw_action_text, subject, body)
+    return structured_action, raw_action_text
 
 
 def process_email(
@@ -161,18 +173,20 @@ def process_email(
     priority: Optional[str] = None,
     model: Optional[LocalGenerationModel] = None,
 ) -> GenerationOutput:
-    """Full generation pipeline for a single email (Summary + Structured Action)."""
+    """Full generation pipeline preserving raw model output alongside parsed output."""
     if model is None:
         model = load_model()
 
     t0 = time.time()
-    summary = summarize_email(subject, body, intent=intent, priority=priority, model=model)
-    action = extract_action(subject, body, intent=intent, priority=priority, model=model)
+    summary, raw_summary = summarize_email(subject, body, intent=intent, priority=priority, model=model)
+    action, raw_action = extract_action(subject, body, intent=intent, priority=priority, model=model)
     latency_ms = (time.time() - t0) * 1000.0
 
     return GenerationOutput(
         summary=summary,
         action=action,
+        raw_model_summary=raw_summary,
+        raw_model_action=raw_action,
         intent_context=intent,
         priority_context=priority,
         latency_ms=latency_ms,

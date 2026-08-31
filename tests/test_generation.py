@@ -102,25 +102,25 @@ class TestActionParsing:
 
     def test_parse_non_actionable_notification(self) -> None:
         raw = "none: purely informational system broadcast"
-        action = parse_action_output(raw, "System Update", "System update completed successfully.", intent="notification")
+        action = parse_action_output(raw, "System Update", "System update completed successfully.")
         assert action.action_type == "none"
 
     def test_parse_reply_action(self) -> None:
         raw = "reply: answer questions regarding the proposal"
-        action = parse_action_output(raw, "Proposal Query", "Could you clarify line 4?", intent="question")
+        action = parse_action_output(raw, "Proposal Query", "Could you clarify line 4?")
         assert action.action_type == "reply"
 
     def test_parse_empty_or_malformed_output(self) -> None:
-        action = parse_action_output("", "Hello", "Just checking in.", intent="other")
+        action = parse_action_output("", "Hello", "Just checking in.")
         assert action.action_type in ALLOWED_ACTION_TYPES
 
 
 class TestInferencePipeline:
     def test_ultra_short_email_handling(self) -> None:
         mock_model = MagicMock()
-        summary = summarize_email("OK", "Thanks!", model=mock_model)
+        summary, raw_summary = summarize_email("OK", "Thanks!", model=mock_model)
         assert "OK" in summary
-        # Mock generate should not even need to be called for ultra-short boilerplate
+        assert "OK" in raw_summary
         assert len(summary) > 0
 
     def test_process_email_end_to_end_with_mock_model(self) -> None:
@@ -138,6 +138,8 @@ class TestInferencePipeline:
         )
         assert isinstance(out, GenerationOutput)
         assert "password" in out.summary.lower()
+        assert out.raw_model_summary == "Password reset request required for security verification."
+        assert out.raw_model_action == "create_task: reset password before Friday EOD"
         assert out.action.action_type in ["create_task", "create_reminder", "reply"]
         assert out.action.due_date is not None
         assert "friday" in out.action.due_date.lower()
