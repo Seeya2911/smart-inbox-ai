@@ -1,12 +1,8 @@
 """Local pretrained generative model loader and inference wrapper (FLAN-T5-base)."""
 from __future__ import annotations
 
-import os
 import time
 from typing import Optional
-
-import torch
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
 DEFAULT_MODEL_NAME = "google/flan-t5-base"
 
@@ -21,6 +17,15 @@ class LocalGenerationModel:
         model_name: str = DEFAULT_MODEL_NAME,
         device: Optional[str] = None,
     ) -> None:
+        try:
+            import torch
+            from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+        except ImportError as e:
+            raise ImportError(
+                "PyTorch and HuggingFace Transformers are required for local generation. "
+                "Please install them via: pip install torch transformers"
+            ) from e
+
         self.model_name = model_name
         if device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
