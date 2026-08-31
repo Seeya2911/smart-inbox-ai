@@ -26,6 +26,7 @@ class LocalGenerationModel:
                 "Please install them via: pip install torch transformers"
             ) from e
 
+        self._torch = torch
         self.model_name = model_name
         if device is None:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -56,7 +57,7 @@ class LocalGenerationModel:
             truncation=True,
         ).to(self.device)
 
-        with torch.no_grad():
+        with self._torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
                 max_new_tokens=max_new_tokens,

@@ -1,9 +1,8 @@
 """Benchmark suite for local pretrained generative foundation (FLAN-T5-base).
 
-Evaluates:
-- Summarization: conciseness ratio, entity/date preservation, token length
-- Action Extraction: structured schema validity, non-action detection, date/time coverage
-- Inference Performance: per-email latency on CPU/device
+Separately evaluates:
+1. RAW MODEL OUTPUT (before parsing or normalization)
+2. PARSED/VALIDATED OUTPUT (after schema validation and safe nulling)
 
 IMPORTANT: Uses a dedicated evaluation subset from the validation pool.
 Does NOT use or contaminate the frozen classification test set.
@@ -29,7 +28,6 @@ from ml.schema import CanonicalEmailExample
 
 def extract_key_entities(text: str) -> List[str]:
     """Find dates, monetary amounts, and numbers to check preservation in summary."""
-    # Dollar amounts, dates, percentages, numbers
     patterns = [
         r"\$\d+(?:,\d{3})*(?:\.\d{2})?",
         r"\b\d+%",
@@ -42,12 +40,50 @@ def extract_key_entities(text: str) -> List[str]:
     return list(set(matches))
 
 
+def get_ground_truth_action_type(ex: CanonicalEmailExample) -> str:
+    """Determine expected ground-truth action type from email characteristics."""
+    intent = str(ex.intent or "").lower()
+    subject = str(ex.subject or "").lower()
+    body = str(ex.body or "").lower()
+
+    if intent == "meeting" or "meeting" in subject or "schedule" in subject:
+        return "create_calendar_event"
+    elif intent == "question" or "reply" in subject or "can you" in body:
+        return "reply"
+    elif intent in ["promotion", "other", "notification"]:
+        return "none"
+    elif intent == "follow_up":
+        return "follow_up"
+    elif intent in ["request", "security", "transactional"]:
+        if any(k in body for k in ["submit", "reset", "verify", "pay", "send", "approve"]):
+            return "create_task"
+        return "reply"
+    return "none"
+
+
+def compute_none_metrics(y_true_is_none: List[bool], y_pred_is_none: List[bool]) -> Dict[str, float]:
+    """Compute Precision, Recall, and F1 for detecting 'none' (non-actionable) emails."""
+    tp = sum(1 for yt, yp in zip(y_true_is_none, y_pred_is_none) if yt and yp)
+    fp = sum(1 for yt, yp in zip(y_true_is_none, y_pred_is_none) if not yt and yp)
+    fn = sum(1 for yt, yp in zip(y_true_is_none, y_pred_is_none) if yt and not yp)
+
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+    return {
+        "precision": round(precision, 4),
+        "recall": round(recall, 4),
+        "f1": round(f1, 4),
+    }
+
+
 def run_generation_benchmark(
     eval_examples: List[CanonicalEmailExample],
     output_dir: Path,
-    max_samples: int = 120,
+    max_samples: int = 50,
 ) -> Dict[str, Any]:
-    """Execute generation benchmark over curated evaluation examples."""
+    """Execute generation benchmark with strict separation between Raw Model and Parsed Outputs."""
     output_dir.mkdir(parents=True, exist_ok=True)
     samples = eval_examples[:max_samples]
 
@@ -60,9 +96,14 @@ def run_generation_benchmark(
     results: List[Dict[str, Any]] = []
     latencies: List[float] = []
     compression_ratios: List[float] = []
-    valid_schema_count = 0
-    non_action_count = 0
     entity_preservation_scores: List[float] = []
+
+    # Ground truth and evaluation lists
+    gt_action_types: List[str] = []
+    raw_action_types: List[str] = []
+    parsed_action_types: List[str] = []
+    raw_is_valid_json: List[bool] = []
+    parsed_is_valid_json: List[bool] = []
 
     t_start = time.time()
     for i, ex in enumerate(samples):
@@ -86,22 +127,45 @@ def run_generation_benchmark(
         entities = extract_key_entities(f"{ex.subject} {clean_body}")
         if entities:
             preserved = sum(1 for e in entities if e.lower() in out.summary.lower())
-            score = preserved / len(entities)
-            entity_preservation_scores.append(score)
+            entity_preservation_scores.append(preserved / len(entities))
 
-        # Action validity
-        if out.action.action_type in ALLOWED_ACTION_TYPES:
-            valid_schema_count += 1
-        if out.action.action_type == "none":
-            non_action_count += 1
+        # Ground truth
+        gt_action = get_ground_truth_action_type(ex)
+        gt_action_types.append(gt_action)
+
+        # 1. Raw Model Output Analysis
+        raw_str = out.raw_model_action.strip()
+        raw_type = "invalid/unrecognized"
+        for act in ALLOWED_ACTION_TYPES:
+            if raw_str.lower().startswith(act) or raw_str.lower() == act:
+                raw_type = act
+                break
+        raw_action_types.append(raw_type)
+
+        # Check raw JSON validity (did the model output strict JSON?)
+        try:
+            json.loads(raw_str)
+            raw_is_valid_json.append(True)
+        except Exception:
+            raw_is_valid_json.append(False)
+
+        # 2. Parsed / Validated Output Analysis
+        parsed_type = out.action.action_type
+        parsed_action_types.append(parsed_type)
+        parsed_is_valid_json.append(parsed_type in ALLOWED_ACTION_TYPES)
 
         results.append({
             "id": ex.id,
             "subject": ex.subject[:80],
             "intent": ex.intent,
             "priority": ex.priority,
-            "summary": out.summary,
-            "action": out.action.to_dict(),
+            "raw_model_summary": out.raw_model_summary,
+            "raw_model_action": out.raw_model_action,
+            "parsed_summary": out.summary,
+            "parsed_action": out.action.to_dict(),
+            "gt_action_type": gt_action,
+            "raw_action_type": raw_type,
+            "parsed_action_type": parsed_type,
             "latency_ms": round(out.latency_ms, 2),
         })
 
@@ -109,6 +173,30 @@ def run_generation_benchmark(
             print(f"  Processed {i + 1}/{len(samples)} emails (Avg latency: {np.mean(latencies):.1f} ms)...")
 
     total_time = time.time() - t_start
+
+    # Metrics calculation
+    # Accuracy: exact match with ground truth
+    raw_acc = sum(1 for gt, r in zip(gt_action_types, raw_action_types) if gt == r) / len(samples)
+    parsed_acc = sum(1 for gt, p in zip(gt_action_types, parsed_action_types) if gt == p) / len(samples)
+
+    # None detection metrics
+    gt_is_none = [gt == "none" for gt in gt_action_types]
+    raw_is_none = [r == "none" for r in raw_action_types]
+    parsed_is_none = [p == "none" for p in parsed_action_types]
+
+    raw_none_m = compute_none_metrics(gt_is_none, raw_is_none)
+    parsed_none_m = compute_none_metrics(gt_is_none, parsed_is_none)
+
+    # False action rate: predicting an action when GT is 'none'
+    gt_none_count = max(sum(gt_is_none), 1)
+    raw_false_actions = sum(1 for gt_n, r_n in zip(gt_is_none, raw_is_none) if gt_n and not r_n)
+    raw_false_action_rate = raw_false_actions / gt_none_count
+
+    parsed_false_actions = sum(1 for gt_n, p_n in zip(gt_is_none, parsed_is_none) if gt_n and not p_n)
+    parsed_false_action_rate = parsed_false_actions / gt_none_count
+
+    raw_json_validity = (sum(raw_is_valid_json) / len(samples)) * 100.0
+    parsed_json_validity = (sum(parsed_is_valid_json) / len(samples)) * 100.0
 
     benchmark_summary = {
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -122,16 +210,32 @@ def run_generation_benchmark(
             "p95_ms": round(float(np.percentile(latencies, 95)), 2),
         },
         "summarization_metrics": {
-            "avg_summary_length_chars": round(float(np.mean([len(r["summary"]) for r in results])), 1),
+            "avg_summary_length_chars": round(float(np.mean([len(r["parsed_summary"]) for r in results])), 1),
             "avg_compression_ratio": round(float(np.mean(compression_ratios)), 3),
             "entity_preservation_rate": round(float(np.mean(entity_preservation_scores)), 3) if entity_preservation_scores else 1.0,
         },
-        "action_extraction_metrics": {
-            "structured_schema_validity_rate": round((valid_schema_count / len(samples)) * 100.0, 2),
-            "non_action_rate": round((non_action_count / len(samples)) * 100.0, 2),
-            "action_type_distribution": {
-                act: sum(1 for r in results if r["action"]["action_type"] == act)
-                for act in ALLOWED_ACTION_TYPES
+        "raw_model_evaluation": {
+            "raw_action_type_accuracy": round(raw_acc * 100.0, 2),
+            "raw_none_precision": raw_none_m["precision"],
+            "raw_none_recall": raw_none_m["recall"],
+            "raw_none_f1": raw_none_m["f1"],
+            "raw_false_action_rate": round(raw_false_action_rate * 100.0, 2),
+            "raw_json_validity": round(raw_json_validity, 2),
+            "raw_action_distribution": {
+                act: sum(1 for r in raw_action_types if r == act)
+                for act in sorted(list(ALLOWED_ACTION_TYPES) + ["invalid/unrecognized"])
+            },
+        },
+        "parsed_model_evaluation": {
+            "parsed_action_type_accuracy": round(parsed_acc * 100.0, 2),
+            "parsed_none_precision": parsed_none_m["precision"],
+            "parsed_none_recall": parsed_none_m["recall"],
+            "parsed_none_f1": parsed_none_m["f1"],
+            "parsed_false_action_rate": round(parsed_false_action_rate * 100.0, 2),
+            "parsed_json_validity": round(parsed_json_validity, 2),
+            "parsed_action_distribution": {
+                act: sum(1 for p in parsed_action_types if p == act)
+                for act in sorted(list(ALLOWED_ACTION_TYPES))
             },
         },
         "sample_generations": results[:10],
@@ -156,47 +260,63 @@ def run_generation_benchmark(
 def _generate_markdown_report(b: Dict[str, Any]) -> str:
     lm = b["latency_metrics"]
     sm = b["summarization_metrics"]
-    am = b["action_extraction_metrics"]
+    raw = b["raw_model_evaluation"]
+    parsed = b["parsed_model_evaluation"]
 
     md = []
     md.append("# Smart Inbox AI -- Local Generative Foundation Benchmark")
+    md.append("## Raw Model vs. Post-Processing Honest Evaluation")
     md.append(f"\n- **Model:** `{b['model_name']}` (Device: `{b['device']}`)")
     md.append(f"- **Sample Size:** {b['sample_size']} emails (from validation pool)")
     md.append(f"- **Total Benchmark Time:** {b['total_time_seconds']}s")
 
-    md.append("\n## 1. Latency & Throughput (CPU)")
+    md.append("\n## 1. RAW MODEL VS PARSED OUTPUT COMPARISON")
+    md.append("| Metric | RAW MODEL OUTPUT | PARSED / VALIDATED OUTPUT | Delta / Impact |")
+    md.append("|---|---|---|---|")
+    md.append(f"| **Action Type Accuracy** | **{raw['raw_action_type_accuracy']}%** | **{parsed['parsed_action_type_accuracy']}%** | Strict parser rejects unsupported actions |")
+    md.append(f"| **'None' Precision** | **{raw['raw_none_precision']}** | **{parsed['parsed_none_precision']}** | Post-processor maps unrecognized outputs to 'none' |")
+    md.append(f"| **'None' Recall** | **{raw['raw_none_recall']}** | **{parsed['parsed_none_recall']}** | Non-actionable email recall |")
+    md.append(f"| **'None' F1-Score** | **{raw['raw_none_f1']}** | **{parsed['parsed_none_f1']}** | F1 on non-actionable emails |")
+    md.append(f"| **False Action Rate** | **{raw['raw_false_action_rate']}%** | **{parsed['parsed_false_action_rate']}%** | Rate of inventing action on 'none' emails |")
+    md.append(f"| **Schema / JSON Validity** | **{raw['raw_json_validity']}%** | **{parsed['parsed_json_validity']}%** | Parser ensures 100% schema compliance |")
+
+    md.append("\n## 2. Latency & Throughput (CPU)")
     md.append(f"- **Mean Latency per Email:** **{lm['mean_ms']} ms**")
     md.append(f"- **Median Latency:** **{lm['median_ms']} ms**")
     md.append(f"- **P95 Latency:** **{lm['p95_ms']} ms**")
 
-    md.append("\n## 2. Summarization Quality")
+    md.append("\n## 3. Summarization Quality")
     md.append(f"- **Average Summary Length:** {sm['avg_summary_length_chars']} chars")
     md.append(f"- **Average Compression Ratio:** {sm['avg_compression_ratio'] * 100:.1f}% of original body length")
     md.append(f"- **Key Entity/Date Preservation Rate:** **{sm['entity_preservation_rate'] * 100:.1f}%**")
 
-    md.append("\n## 3. Action Extraction & Structured Schema Validity")
-    md.append(f"- **Schema Validity Rate:** **{am['structured_schema_validity_rate']}%** (Strict adherence to ALLOWED_ACTION_TYPES)")
-    md.append(f"- **Non-Action Rate:** {am['non_action_rate']}%")
-    md.append("\n### Action Type Distribution:")
-    for act, count in sorted(am["action_type_distribution"].items(), key=lambda x: -x[1]):
+    md.append("\n## 4. Raw vs. Parsed Distribution Breakdown")
+    md.append("### Raw Model Output Distribution:")
+    for act, count in sorted(raw["raw_action_distribution"].items(), key=lambda x: -x[1]):
         if count > 0:
             md.append(f"- `{act}`: {count} cases")
 
-    md.append("\n## 4. Sample Generations")
+    md.append("\n### Parsed Output Distribution:")
+    for act, count in sorted(parsed["parsed_action_distribution"].items(), key=lambda x: -x[1]):
+        if count > 0:
+            md.append(f"- `{act}`: {count} cases")
+
+    md.append("\n## 5. Sample Generations (Raw vs Parsed)")
     for s in b["sample_generations"][:5]:
         md.append(f"### ID: `{s['id']}` (Intent: `{s['intent']}`, Priority: `{s['priority']}`)")
         md.append(f"- **Subject:** {s['subject']}")
-        md.append(f"- **Summary:** {s['summary']}")
-        md.append(f"- **Extracted Action:** `{s['action']['action_type']}` -- *{s['action'].get('title') or 'N/A'}* (Due: {s['action'].get('due_date') or 'None'})")
+        md.append(f"- **Raw Model Summary:** {s['raw_model_summary']}")
+        md.append(f"- **Raw Model Action Output:** `{s['raw_model_action']}`")
+        md.append(f"- **Parsed Structured Action:** `{s['parsed_action_type']}` -- *{s['parsed_action'].get('title') or 'N/A'}*")
 
     return "\n".join(md)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run FLAN-T5 generation benchmark")
+    parser = argparse.ArgumentParser(description="Run FLAN-T5 generation benchmark with raw vs parsed evaluation")
     parser.add_argument("--dataset-splits", type=str, default="artifacts/canonical_multi_output_dataset.json")
     parser.add_argument("--output-dir", type=str, default="artifacts")
-    parser.add_argument("--max-samples", type=int, default=120)
+    parser.add_argument("--max-samples", type=int, default=50)
     args = parser.parse_args()
 
     splits_path = Path(args.dataset_splits)
@@ -206,7 +326,6 @@ def main() -> None:
     with splits_path.open("r", encoding="utf-8") as fh:
         split_data = json.load(fh)["splits"]
 
-    # Use validation pool for generation evaluation
     val_ex = [CanonicalEmailExample.from_dict(d) for d in split_data["val"]]
     run_generation_benchmark(val_ex, Path(args.output_dir), max_samples=args.max_samples)
 

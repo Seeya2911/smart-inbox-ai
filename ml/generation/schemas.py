@@ -70,10 +70,12 @@ class SuggestedAction:
 
 @dataclass
 class GenerationOutput:
-    """Consolidated generation output for a single email."""
+    """Consolidated generation output for a single email, preserving raw and parsed outputs."""
 
     summary: str
     action: SuggestedAction
+    raw_model_summary: str = ""
+    raw_model_action: str = ""
     intent_context: Optional[str] = None
     priority_context: Optional[str] = None
     latency_ms: float = 0.0
@@ -82,6 +84,8 @@ class GenerationOutput:
         return {
             "summary": self.summary,
             "action": self.action.to_dict(),
+            "raw_model_summary": self.raw_model_summary,
+            "raw_model_action": self.raw_model_action,
             "intent_context": self.intent_context,
             "priority_context": self.priority_context,
             "latency_ms": round(self.latency_ms, 2),
