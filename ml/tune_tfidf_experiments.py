@@ -63,14 +63,12 @@ class TunableMultiOutputClassifier:
             min_df=min_df,
             sublinear_tf=sublinear_tf,
             max_features=max_features,
-            strip_accents="unicode",
         )
         self.priority_vectorizer = TfidfVectorizer(
             ngram_range=ngram_range,
             min_df=min_df,
             sublinear_tf=sublinear_tf,
             max_features=max_features,
-            strip_accents="unicode",
         )
 
         self.intent_head = LogisticRegression(

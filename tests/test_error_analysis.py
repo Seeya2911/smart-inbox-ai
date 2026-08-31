@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 from typing import List
 
+import numpy as np
 import pytest
 
 from ml.error_analysis import (
@@ -32,21 +33,31 @@ class TestCalibrationMetrics:
     def test_perfect_calibration(self) -> None:
         y_true = ["low", "low", "high", "high"]
         y_pred = ["low", "low", "high", "high"]
-        confidences = [1.0, 1.0, 1.0, 1.0]
+        proba = np.array([
+            [1.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [0.0, 1.0],
+        ])
+        classes = ["low", "high"]
 
-        metrics = compute_calibration_metrics(y_true, y_pred, confidences, n_bins=5)
-        assert metrics["brier_score"] == 0.0
-        assert metrics["ece"] == 0.0
+        metrics = compute_calibration_metrics(y_true, y_pred, proba, classes, n_bins=5)
+        assert metrics["multiclass_brier_score"] == 0.0
+        assert metrics["top_confidence_ece"] == 0.0
         assert len(metrics["reliability_bins"]) == 5
 
     def test_uncalibrated_case(self) -> None:
         y_true = ["low", "high"]
         y_pred = ["high", "low"]
-        confidences = [0.9, 0.9]
+        proba = np.array([
+            [0.1, 0.9],
+            [0.9, 0.1],
+        ])
+        classes = ["low", "high"]
 
-        metrics = compute_calibration_metrics(y_true, y_pred, confidences, n_bins=5)
-        assert metrics["brier_score"] > 0.5
-        assert metrics["ece"] > 0.5
+        metrics = compute_calibration_metrics(y_true, y_pred, proba, classes, n_bins=5)
+        assert metrics["multiclass_brier_score"] > 1.0
+        assert metrics["top_confidence_ece"] > 0.5
 
 
 class TestConfidenceBucketing:

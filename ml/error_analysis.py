@@ -33,17 +33,31 @@ from ml.train_multi_output import MultiOutputClassifier
 def compute_calibration_metrics(
     y_true: List[str],
     y_pred: List[str],
-    confidences: List[float],
+    proba: np.ndarray,
+    classes: List[str],
     n_bins: int = 10,
 ) -> Dict[str, Any]:
-    """Compute Expected Calibration Error (ECE) and Brier score."""
-    if not y_true:
-        return {"ece": 0.0, "brier_score": 0.0, "reliability_bins": []}
+    """Compute standard multiclass Brier score and Expected Calibration Error (ECE).
 
+    Multiclass Brier score: mean(sum((p_ik - y_ik)^2)) across all classes k.
+    ECE: Expected Calibration Error of the top predicted class confidence.
+    """
+    if not y_true or len(proba) == 0:
+        return {"top_confidence_ece": 0.0, "multiclass_brier_score": 0.0, "reliability_bins": []}
+
+    class_to_idx = {c: i for i, c in enumerate(classes)}
+    y_true_one_hot = np.zeros_like(proba)
+    for row_idx, label in enumerate(y_true):
+        if label in class_to_idx:
+            y_true_one_hot[row_idx, class_to_idx[label]] = 1.0
+
+    # Standard Multiclass Brier Score: 1/N * sum_i(sum_k((p_ik - y_ik)^2))
+    multiclass_brier_score = float(np.mean(np.sum((proba - y_true_one_hot) ** 2, axis=1)))
+
+    confidences = [float(np.max(row)) for row in proba]
     correctness = [1 if t == p else 0 for t, p in zip(y_true, y_pred)]
-    brier_score = float(np.mean([(c - acc) ** 2 for c, acc in zip(confidences, correctness)]))
 
-    # Standard equal-width bins
+    # Standard equal-width bins on top-1 confidence
     bins = np.linspace(0.0, 1.0, n_bins + 1)
     reliability_bins = []
     total_samples = len(y_true)
@@ -82,8 +96,8 @@ def compute_calibration_metrics(
             )
 
     return {
-        "ece": round(float(ece), 4),
-        "brier_score": round(float(brier_score), 4),
+        "top_confidence_ece": round(float(ece), 4),
+        "multiclass_brier_score": round(float(multiclass_brier_score), 4),
         "reliability_bins": reliability_bins,
     }
 
@@ -392,7 +406,7 @@ def categorize_root_causes(
         {
             "category": "F. Calibration & Confidence Distribution",
             "impact": "Low-to-Medium",
-            "description": f"ECE Intent={calibration_intent['ece']}, ECE Priority={calibration_priority['ece']}. Logistic regression probabilities are reasonably ordered by confidence but uncalibrated at the boundaries.",
+            "description": f"ECE Intent={calibration_intent['top_confidence_ece']}, ECE Priority={calibration_priority['top_confidence_ece']}, Multiclass Brier: Intent={calibration_intent['multiclass_brier_score']}, Priority={calibration_priority['multiclass_brier_score']}. Logistic regression probabilities are reasonably ordered by confidence but uncalibrated at the boundaries.",
             "evidence": "Predictions in 0.90-1.00 confidence bucket exhibit >90% accuracy, while 0.50-0.59 bucket shows higher uncertainty.",
         },
     ]
@@ -424,11 +438,20 @@ def run_error_analysis(
     priority_analysis = analyze_priority_errors(val_examples, preds)
     intent_analysis = analyze_intent_errors(val_examples, preds)
 
+    # Extract probability distributions for calibration metrics
+    texts = classifier._prepare_texts(val_examples)
+    X_i = classifier.intent_vectorizer.transform(texts)
+    X_p = classifier.priority_vectorizer.transform(texts)
+    proba_i = classifier.intent_head.predict_proba(X_i)
+    proba_p = classifier.priority_head.predict_proba(X_p)
+    classes_i = list(classifier.intent_head.classes_)
+    classes_p = list(classifier.priority_head.classes_)
+
     # 2. Confidence & calibration
     conf_buckets_i = compute_confidence_buckets(y_true_i, y_pred_i, conf_i)
     conf_buckets_p = compute_confidence_buckets(y_true_p, y_pred_p, conf_p)
-    calib_i = compute_calibration_metrics(y_true_i, y_pred_i, conf_i)
-    calib_p = compute_calibration_metrics(y_true_p, y_pred_p, conf_p)
+    calib_i = compute_calibration_metrics(y_true_i, y_pred_i, proba_i, classes_i)
+    calib_p = compute_calibration_metrics(y_true_p, y_pred_p, proba_p, classes_p)
 
     # 3. Label conflicts
     conflicts_analysis = diagnose_label_conflicts(val_examples, preds)
@@ -508,8 +531,8 @@ def _generate_markdown_report(report: Dict[str, Any]) -> str:
         md.append(f"| `{p['true_intent']}` | `{p['predicted_intent']}` | {p['count']} | {p['percentage_of_true_class']}% | {p['avg_confidence']:.3f} |")
 
     md.append("\n## 4. Confidence & Calibration Diagnostics")
-    md.append(f"- **Intent ECE:** {calib['intent']['ece']} | **Brier Score:** {calib['intent']['brier_score']}")
-    md.append(f"- **Priority ECE:** {calib['priority']['ece']} | **Brier Score:** {calib['priority']['brier_score']}")
+    md.append(f"- **Intent Top-Confidence ECE:** {calib['intent']['top_confidence_ece']} | **Multiclass Brier Score:** {calib['intent']['multiclass_brier_score']}")
+    md.append(f"- **Priority Top-Confidence ECE:** {calib['priority']['top_confidence_ece']} | **Multiclass Brier Score:** {calib['priority']['multiclass_brier_score']}")
     md.append(f"- **Correct Predictions Avg Confidence:** Intent={conf['intent']['correct_avg_confidence']}, Priority={conf['priority']['correct_avg_confidence']}")
     md.append(f"- **Incorrect Predictions Avg Confidence:** Intent={conf['intent']['incorrect_avg_confidence']}, Priority={conf['priority']['incorrect_avg_confidence']}")
 
